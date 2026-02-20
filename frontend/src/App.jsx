@@ -358,7 +358,7 @@ export function App() {
   return (
     <div className="app-shell">
       <div className="hud">
-        <h1>Dynamic Topology</h1>
+        <h1>Dynamic Topology - Deploy Check 2026-02-20</h1>
         <p>Status: {connected ? 'connected' : 'disconnected'}</p>
         <p>WS: {WS_URL}</p>
         <p>t: {frame ? frame.sim_time_s.toFixed(1) : '-'} s</p>

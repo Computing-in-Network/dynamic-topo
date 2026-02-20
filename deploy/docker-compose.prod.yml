@@ -13,4 +13,4 @@ services:
     depends_on:
       - topo-backend
     ports:
-      - "8080:80"
+      - "5173:80"
