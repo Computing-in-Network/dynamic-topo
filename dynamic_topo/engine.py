@@ -306,7 +306,7 @@ class TopologyEngine:
     def node_ids(self) -> List[str]:
         return self.node_display_names
 
-    def step(self, sim_time_s: float) -> TickResult:
+    def step(self, sim_time_s: float, persist: bool = True) -> TickResult:
         start = perf_counter()
 
         sat_positions, sat_velocity = self._satellite_ecef_with_velocity(sim_time_s)
@@ -314,7 +314,8 @@ class TopologyEngine:
         node_positions = np.vstack([sat_positions, mobile_positions])
 
         adjacency = self._adjacency_from_positions(node_positions)
-        self._write_state_to_redis(sim_time_s, node_positions, adjacency)
+        if persist:
+            self.persist_state(sim_time_s, node_positions, adjacency)
 
         elapsed_ms = (perf_counter() - start) * 1000.0
         return TickResult(
@@ -325,13 +326,16 @@ class TopologyEngine:
             satellite_velocity_ecef=sat_velocity,
         )
 
-    def run_steps(self, steps: int, start_time_s: float = 0.0) -> List[TickResult]:
+    def run_steps(self, steps: int, start_time_s: float = 0.0, persist: bool = True) -> List[TickResult]:
         results: List[TickResult] = []
         sim_time = start_time_s
         for _ in range(steps):
-            results.append(self.step(sim_time))
+            results.append(self.step(sim_time, persist=persist))
             sim_time += self.config.timestep_s
         return results
+
+    def persist_state(self, sim_time_s: float, positions: np.ndarray, adjacency: np.ndarray) -> None:
+        self._write_state_to_redis(sim_time_s, positions, adjacency)
 
     def build_frame(self, result: TickResult) -> TopologyFrame:
         positions = result.node_positions_ecef
