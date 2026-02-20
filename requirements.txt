@@ -1,0 +1,5 @@
+skyfield
+numpy
+redis
+pytest
+pyproj
