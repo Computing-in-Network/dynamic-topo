@@ -2,4 +2,6 @@ __pycache__/
 *.pyc
 .aider*
 .env
-.venv/" | Out-File -FilePath .gitignore -Encoding utf8
+.venv/
+.pytest_cache/
+*.egg-info/
