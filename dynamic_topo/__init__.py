@@ -1,5 +1,5 @@
 """Dynamic topology simulation package."""
 
-from .engine import SimulationConfig, TopologyEngine, TickResult
+from .engine import SimulationConfig, TickResult, TopologyEngine, TopologyFrame
 
-__all__ = ["SimulationConfig", "TopologyEngine", "TickResult"]
+__all__ = ["SimulationConfig", "TopologyEngine", "TickResult", "TopologyFrame"]

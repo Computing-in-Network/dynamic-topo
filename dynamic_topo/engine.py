@@ -61,12 +61,22 @@ class TickResult:
     elapsed_ms: float
 
 
+@dataclass(frozen=True)
+class TopologyFrame:
+    sim_time_s: float
+    elapsed_ms: float
+    nodes: List[dict]
+    links: List[dict]
+    metrics: dict
+
+
 class TopologyEngine:
     def __init__(self, config: SimulationConfig, seed: int = 42, redis_client=None):
         self.config = config
         self._rng = np.random.default_rng(seed)
         self._redis = redis_client if redis_client is not None else create_redis_client(config.redis_url)
         self._lla_to_ecef = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
+        self._ecef_to_lla = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
 
         self._init_satellite_state()
         self._init_mobile_state()
@@ -151,6 +161,13 @@ class TopologyEngine:
         self._down_hold_ticks = max(1, int(np.ceil(self.config.down_hold_s / self.config.timestep_s)))
 
     @property
+    def node_type_names(self) -> List[str]:
+        return [
+            "leo" if code == NODE_TYPE_LEO else ("aircraft" if code == NODE_TYPE_AIR else "ship")
+            for code in self._type_codes.tolist()
+        ]
+
+    @property
     def node_ids(self) -> List[str]:
         cfg = self.config
         ids: List[str] = []
@@ -180,6 +197,47 @@ class TopologyEngine:
             results.append(self.step(sim_time))
             sim_time += self.config.timestep_s
         return results
+
+    def build_frame(self, result: TickResult) -> TopologyFrame:
+        positions = result.node_positions_ecef
+        x = positions[:, 0]
+        y = positions[:, 1]
+        z = positions[:, 2]
+        lon, lat, alt = self._ecef_to_lla.transform(x, y, z)
+
+        node_types = self.node_type_names
+        node_ids = self.node_ids
+        nodes: List[dict] = []
+        for idx, node_id in enumerate(node_ids):
+            nodes.append(
+                {
+                    "id": node_id,
+                    "type": node_types[idx],
+                    "x": float(x[idx]),
+                    "y": float(y[idx]),
+                    "z": float(z[idx]),
+                    "lat": float(lat[idx]),
+                    "lon": float(lon[idx]),
+                    "alt_m": float(alt[idx]),
+                }
+            )
+
+        ai, aj = np.where(np.triu(result.adjacency, k=1))
+        links = [{"a": node_ids[int(i)], "b": node_ids[int(j)]} for i, j in zip(ai, aj, strict=True)]
+        degree = result.adjacency.sum(axis=1)
+        metrics = {
+            "edge_count": int(len(links)),
+            "avg_degree": float(np.mean(degree)),
+            "max_degree": int(np.max(degree)),
+        }
+
+        return TopologyFrame(
+            sim_time_s=result.sim_time_s,
+            elapsed_ms=result.elapsed_ms,
+            nodes=nodes,
+            links=links,
+            metrics=metrics,
+        )
 
     def _satellite_ecef(self, sim_time_s: float) -> np.ndarray:
         theta = self._sat_phase + self._sat_angular_rate * sim_time_s

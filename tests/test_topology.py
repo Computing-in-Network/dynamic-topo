@@ -124,3 +124,17 @@ def test_node_types_are_mapped_correctly() -> None:
     engine = build_engine()
     assert np.all(engine._type_codes[:200] == NODE_TYPE_LEO)
     assert np.all(engine._type_codes[200:250] == NODE_TYPE_AIR)
+
+
+def test_build_frame_contains_nodes_links_and_metrics() -> None:
+    engine = build_engine()
+    engine.step(0.0)  # warm hysteresis
+    result = engine.step(1.0)
+    frame = engine.build_frame(result)
+
+    assert frame.sim_time_s == 1.0
+    assert len(frame.nodes) == 300
+    assert "edge_count" in frame.metrics
+    assert "avg_degree" in frame.metrics
+    assert "max_degree" in frame.metrics
+    assert all("id" in node and "lat" in node and "lon" in node for node in frame.nodes)

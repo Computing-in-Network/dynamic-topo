@@ -9,6 +9,7 @@ dependencies = [
     "pyproj",
     "redis",
     "skyfield",
+    "websockets>=15.0",
 ]
 
 [dependency-groups]
