@@ -81,3 +81,26 @@ body,
   background: #ff7f11;
   box-shadow: 0 0 8px rgba(255, 127, 17, 0.65);
 }
+
+.node-tooltip {
+  position: absolute;
+  z-index: 12;
+  min-width: 220px;
+  max-width: 260px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 10px;
+  background: linear-gradient(150deg, rgba(7, 27, 42, 0.94), rgba(13, 54, 79, 0.9));
+  box-shadow: 0 10px 22px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #eaf2fb;
+}
+
+.node-tooltip .title {
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ffffff;
+}

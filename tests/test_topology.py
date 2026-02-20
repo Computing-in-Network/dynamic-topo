@@ -154,6 +154,9 @@ def test_build_frame_contains_nodes_links_and_metrics() -> None:
     assert "edge_count" in frame.metrics
     assert "avg_degree" in frame.metrics
     assert "max_degree" in frame.metrics
+    assert "mobile_connected_count" in frame.metrics
+    assert "mobile_connected_ratio" in frame.metrics
+    assert 0.0 <= frame.metrics["mobile_connected_ratio"] <= 1.0
     assert all("id" in node and "lat" in node and "lon" in node for node in frame.nodes)
     assert frame.nodes[0]["orbit_class"] == "polar"
     assert frame.nodes[100]["orbit_class"] == "inclined"

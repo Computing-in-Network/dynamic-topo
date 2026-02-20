@@ -41,20 +41,20 @@ class SimulationConfig:
 
     # Base link feasibility constraints.
     dmax_leo_leo_m: float = 5_000_000.0
-    dmax_leo_air_m: float = 3_000_000.0
-    dmax_leo_ship_m: float = 2_800_000.0
+    dmax_leo_air_m: float = 4_500_000.0
+    dmax_leo_ship_m: float = 4_200_000.0
     dmax_air_air_m: float = 700_000.0
     dmax_air_ship_m: float = 400_000.0
     dmax_ship_ship_m: float = 80_000.0
 
     # Capacity constraints.
-    max_neighbors_leo: int = 8
+    max_neighbors_leo: int = 10
     max_neighbors_air: int = 4
     max_neighbors_ship: int = 3
 
     # Satellite beam model (nadir-pointing cone towards Earth center).
-    sat_beam_half_angle_deg: float = 45.0
-    sat_beam_slots: int = 16
+    sat_beam_half_angle_deg: float = 58.0
+    sat_beam_slots: int = 24
 
     # Link state hysteresis.
     up_hold_s: float = 2.0
@@ -383,6 +383,11 @@ class TopologyEngine:
             "avg_degree": float(np.mean(degree)),
             "max_degree": int(np.max(degree)),
         }
+        if self.config.aircraft_count + self.config.ship_count > 0:
+            mobile_degree = degree[self._sat_count :]
+            mobile_connected = int(np.sum(mobile_degree > 0))
+            metrics["mobile_connected_count"] = mobile_connected
+            metrics["mobile_connected_ratio"] = float(mobile_connected / mobile_degree.size)
 
         return TopologyFrame(
             sim_time_s=result.sim_time_s,

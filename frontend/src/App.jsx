@@ -7,8 +7,11 @@ import {
   HorizontalOrigin,
   LabelStyle,
   OpenStreetMapImageryProvider,
+  ScreenSpaceEventHandler,
+  ScreenSpaceEventType,
   TileMapServiceImageryProvider,
   VerticalOrigin,
+  defined,
   Viewer
 } from 'cesium';
 
@@ -140,6 +143,7 @@ function resolveLinkStyle(a, b) {
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
+  const [hoverInfo, setHoverInfo] = useState(null);
 
   const containerRef = useRef(null);
   const viewerRef = useRef(null);
@@ -148,6 +152,8 @@ export function App() {
   const trailPointsRef = useRef(new Map());
   const orbitEntitiesRef = useRef(new Map());
   const linkEntitiesRef = useRef(new Map());
+  const pickHandlerRef = useRef(null);
+  const nodeStateRef = useRef(new Map());
 
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) {
@@ -183,11 +189,37 @@ export function App() {
       destination: Cartesian3.fromDegrees(110, 25, 22_000_000),
       duration: 0
     });
+    const pickHandler = new ScreenSpaceEventHandler(viewer.scene.canvas);
+    pickHandler.setInputAction((movement) => {
+      const picked = viewer.scene.pick(movement.endPosition);
+      if (!defined(picked) || !picked?.id?.id || typeof picked.id.id !== 'string') {
+        setHoverInfo(null);
+        return;
+      }
+      if (!picked.id.id.startsWith('node-')) {
+        setHoverInfo(null);
+        return;
+      }
+      const nodeId = picked.id.id.slice(5);
+      const node = nodeStateRef.current.get(nodeId);
+      if (!node) {
+        setHoverInfo(null);
+        return;
+      }
+      setHoverInfo({
+        x: movement.endPosition.x,
+        y: movement.endPosition.y,
+        node
+      });
+    }, ScreenSpaceEventType.MOUSE_MOVE);
 
     viewerRef.current = viewer;
+    pickHandlerRef.current = pickHandler;
 
     return () => {
+      pickHandler.destroy();
       viewer.destroy();
+      pickHandlerRef.current = null;
       viewerRef.current = null;
     };
   }, []);
@@ -317,6 +349,7 @@ export function App() {
     }
 
     const activeLinks = new Set();
+    const degreeCount = new Map();
     const nodeMap = new Map(frame.nodes.map((n) => [n.id, n]));
     for (const edge of frame.links) {
       const a = nodeMap.get(edge.a);
@@ -324,6 +357,8 @@ export function App() {
       if (!a || !b) {
         continue;
       }
+      degreeCount.set(edge.a, (degreeCount.get(edge.a) || 0) + 1);
+      degreeCount.set(edge.b, (degreeCount.get(edge.b) || 0) + 1);
       const linkId = `${edge.a}-${edge.b}`;
       activeLinks.add(linkId);
       const positions = [toCartesian(a), toCartesian(b)];
@@ -353,6 +388,17 @@ export function App() {
         linkEntitiesRef.current.delete(id);
       }
     }
+
+    const nodeState = new Map();
+    for (const node of frame.nodes) {
+      const degree = degreeCount.get(node.id) || 0;
+      nodeState.set(node.id, {
+        ...node,
+        degree,
+        has_link: degree > 0
+      });
+    }
+    nodeStateRef.current = nodeState;
   }, [frame]);
 
   return (
@@ -365,6 +411,8 @@ export function App() {
         <p>nodes: {frame ? frame.nodes.length : 0}</p>
         <p>links: {frame ? frame.metrics.edge_count : 0}</p>
         <p>avg degree: {frame ? frame.metrics.avg_degree.toFixed(2) : '-'}</p>
+        <p>mobile connected: {frame ? `${frame.metrics.mobile_connected_count ?? 0}/${(frame.nodes.filter((n) => n.type !== 'leo').length || 1)}` : '-'}</p>
+        <p>mobile ratio: {frame ? `${((frame.metrics.mobile_connected_ratio ?? 0) * 100).toFixed(1)}%` : '-'}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
         <div className="legend">
           <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
@@ -372,6 +420,22 @@ export function App() {
           <div className="legend-item"><span className="swatch sat-mobile" />satellite-air/ship link</div>
         </div>
       </div>
+      {hoverInfo ? (
+        <div
+          className="node-tooltip"
+          style={{
+            left: `${Math.min(hoverInfo.x + 14, window.innerWidth - 260)}px`,
+            top: `${Math.min(hoverInfo.y + 14, window.innerHeight - 180)}px`
+          }}
+        >
+          <div className="title">{hoverInfo.node.name}</div>
+          <div>id: {hoverInfo.node.id}</div>
+          <div>type: {hoverInfo.node.category}</div>
+          <div>orbit: {hoverInfo.node.orbit_class || '-'}</div>
+          <div>links: {hoverInfo.node.has_link ? `yes (degree ${hoverInfo.node.degree})` : 'no'}</div>
+          <div>alt: {hoverInfo.node.alt_m.toFixed(0)} m</div>
+        </div>
+      ) : null}
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
   );
