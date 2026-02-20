@@ -1,0 +1,71 @@
+name: build-and-deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install deps
+        run: uv sync --dev
+
+      - name: Run tests
+        run: uv run python -m pytest -q
+
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute image tag
+        run: echo "IMAGE_TAG=$(echo '${{ gitea.sha }}' | cut -c1-12)" >> $GITHUB_ENV
+
+      - name: Docker login
+        run: echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login "${{ secrets.REGISTRY }}" -u "${{ secrets.REGISTRY_USER }}" --password-stdin
+
+      - name: Build backend image
+        run: |
+          docker build -f Dockerfile.backend -t ${{ secrets.REGISTRY }}/${{ secrets.IMAGE_NAMESPACE }}/dynamic-topo-backend:${IMAGE_TAG} .
+
+      - name: Build frontend image
+        run: |
+          docker build -f frontend/Dockerfile -t ${{ secrets.REGISTRY }}/${{ secrets.IMAGE_NAMESPACE }}/dynamic-topo-frontend:${IMAGE_TAG} ./frontend
+
+      - name: Push backend image
+        run: docker push ${{ secrets.REGISTRY }}/${{ secrets.IMAGE_NAMESPACE }}/dynamic-topo-backend:${IMAGE_TAG}
+
+      - name: Push frontend image
+        run: docker push ${{ secrets.REGISTRY }}/${{ secrets.IMAGE_NAMESPACE }}/dynamic-topo-frontend:${IMAGE_TAG}
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Deploy on server
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+          "cd ${{ secrets.DEPLOY_PATH }} && \
+           export IMAGE_REPO=${{ secrets.REGISTRY }}/${{ secrets.IMAGE_NAMESPACE }} && \
+           export IMAGE_TAG=${IMAGE_TAG} && \
+           docker compose -f docker-compose.prod.yml pull && \
+           docker compose -f docker-compose.prod.yml up -d --remove-orphans"

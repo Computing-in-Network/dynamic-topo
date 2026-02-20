@@ -1,0 +1,16 @@
+services:
+  topo-backend:
+    image: ${IMAGE_REPO}/dynamic-topo-backend:${IMAGE_TAG}
+    container_name: topo-backend
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+
+  topo-frontend:
+    image: ${IMAGE_REPO}/dynamic-topo-frontend:${IMAGE_TAG}
+    container_name: topo-frontend
+    restart: unless-stopped
+    depends_on:
+      - topo-backend
+    ports:
+      - "8080:80"

@@ -48,3 +48,34 @@ VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 ```bash
 uv run python -m pytest -q
 ```
+
+## 使用 Gitea Actions + Docker 部署（一步步）
+
+1. 准备部署机（只做一次）
+   - 安装 `docker` 和 `docker compose`
+   - 新建目录，例如 `/opt/dynamic-topo`
+   - 把 `deploy/docker-compose.prod.yml` 放到部署目录
+
+2. 准备镜像仓库（只做一次）
+   - 可用 Gitea Container Registry 或私有 Docker Registry
+   - 记录仓库地址、用户名、密码
+
+3. 在 Gitea 仓库配置 Secrets（仓库 -> Settings -> Secrets）
+   - `REGISTRY`: 仓库地址（如 `registry.example.com`）
+   - `REGISTRY_USER`: 仓库用户名
+   - `REGISTRY_PASSWORD`: 仓库密码/令牌
+   - `IMAGE_NAMESPACE`: 镜像命名空间（如 `team`）
+   - `DEPLOY_HOST`: 部署机 IP/域名
+   - `DEPLOY_USER`: 部署机 SSH 用户
+   - `DEPLOY_SSH_KEY`: 私钥内容（建议 ed25519）
+   - `DEPLOY_PATH`: 部署目录（如 `/opt/dynamic-topo`）
+
+4. 启用并运行 workflow
+   - Workflow 文件：`.gitea/workflows/deploy.yml`
+   - 推送 `main` 分支会自动触发
+   - 或在 Gitea Actions 页面手动 `Run workflow`
+
+5. 部署验证
+   - 前端：`http://<DEPLOY_HOST>:8080`
+   - 后端 WS：`ws://<DEPLOY_HOST>:8765`
+   - 在部署机查看容器：`docker ps`
