@@ -76,6 +76,18 @@ def test_satellite_keeps_same_plane_neighbors() -> None:
             assert bool(sat_adj[i, b])
 
 
+def test_satellite_same_plane_neighbors_are_on_from_first_tick() -> None:
+    engine = build_engine()
+    result = engine.step(0.0)
+    sat_adj = result.adjacency[:200, :200]
+    for i in range(200):
+        a, b = engine._same_plane_sat_neighbors(i)
+        if a != i:
+            assert bool(sat_adj[i, a])
+        if b != i:
+            assert bool(sat_adj[i, b])
+
+
 def test_satellite_mobile_edges_are_not_capped_by_count() -> None:
     cfg = SimulationConfig(
         total_nodes=7,

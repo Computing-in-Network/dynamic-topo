@@ -41,8 +41,8 @@ class SimulationConfig:
 
     # Base link feasibility constraints.
     dmax_leo_leo_m: float = 5_000_000.0
-    dmax_leo_air_m: float = 4_500_000.0
-    dmax_leo_ship_m: float = 4_200_000.0
+    dmax_leo_air_m: float = 2_800_000.0
+    dmax_leo_ship_m: float = 2_700_000.0
     dmax_air_air_m: float = 700_000.0
     dmax_air_ship_m: float = 400_000.0
     dmax_ship_ship_m: float = 80_000.0
@@ -54,7 +54,7 @@ class SimulationConfig:
     max_neighbors_ship: int = 3
 
     # Satellite beam model (nadir-pointing cone towards Earth center).
-    sat_beam_half_angle_deg: float = 58.0
+    sat_beam_half_angle_deg: float = 66.5
     sat_beam_slots: int = 24
 
     # Link state hysteresis.
@@ -534,6 +534,7 @@ class TopologyEngine:
         beam_ok = self._satellite_beam_mask(positions, delta)
         candidate &= beam_ok
 
+        sat_mandatory = self._build_same_plane_mandatory_edges()
         sat_backbone = self._build_satellite_backbone(candidate, dist)
         candidate_wo_sat_sat = candidate.copy()
         candidate_wo_sat_sat[: self._sat_count, : self._sat_count] = False
@@ -542,6 +543,11 @@ class TopologyEngine:
         combined = capped | sat_backbone
         np.fill_diagonal(combined, False)
         stable = self._stabilize_links(combined)
+        # Same-plane satellite neighbor links are deterministic backbone edges.
+        # Keep them always on instead of delaying via hysteresis counters.
+        stable |= sat_mandatory
+        np.fill_diagonal(stable, False)
+        stable = np.logical_or(stable, stable.T)
         return stable
 
     def _same_plane_sat_neighbors(self, sat_idx: int) -> tuple[int, int]:
@@ -622,6 +628,21 @@ class TopologyEngine:
                     sat_degree[i] += 1
                     sat_degree[best_j] += 1
 
+        np.fill_diagonal(selected, False)
+        return selected
+
+    def _build_same_plane_mandatory_edges(self) -> np.ndarray:
+        n = self.config.total_nodes
+        selected = np.zeros((n, n), dtype=bool)
+        sat_adj = selected[: self._sat_count, : self._sat_count]
+        for i in range(self._sat_count):
+            a, b = self._same_plane_sat_neighbors(i)
+            if a != i:
+                sat_adj[i, a] = True
+                sat_adj[a, i] = True
+            if b != i:
+                sat_adj[i, b] = True
+                sat_adj[b, i] = True
         np.fill_diagonal(selected, False)
         return selected
 
