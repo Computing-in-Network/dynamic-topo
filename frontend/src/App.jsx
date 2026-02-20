@@ -4,6 +4,7 @@ import {
   Cartesian3,
   Color,
   EllipsoidTerrainProvider,
+  HorizontalOrigin,
   LabelStyle,
   OpenStreetMapImageryProvider,
   TileMapServiceImageryProvider,
@@ -16,16 +17,124 @@ const defaultWsUrl = (() => {
   return `${scheme}://${window.location.hostname}:8765`;
 })();
 const WS_URL = import.meta.env.VITE_TOPO_WS_URL || defaultWsUrl;
-const TRAIL_LEN = 120;
+const TRAIL_LEN_BY_TYPE = {
+  leo: 180,
+  aircraft: 260,
+  ship: 300
+};
+const SAT_ORBIT_SAMPLES = 72;
 
 const typeColor = {
   leo: Color.fromCssColorString('#ffb703'),
   aircraft: Color.fromCssColorString('#2a9d8f'),
   ship: Color.fromCssColorString('#00b4d8')
 };
+const orbitColor = {
+  polar: Color.fromCssColorString('#7dff00').withAlpha(0.42),
+  inclined: Color.fromCssColorString('#4df8b5').withAlpha(0.36)
+};
+const linkStyle = {
+  sat_sat: {
+    color: Color.fromCssColorString('#ff4fd8').withAlpha(0.86),
+    width: 2.0
+  },
+  sat_mobile: {
+    color: Color.fromCssColorString('#ff7f11').withAlpha(0.9),
+    width: 2.2
+  },
+  other: {
+    color: Color.fromCssColorString('#8da9c4').withAlpha(0.18),
+    width: 1.0
+  }
+};
+
+function svgDataUri(svg) {
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function buildNodeIcon(type) {
+  if (type === 'leo') {
+    return svgDataUri(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+        <defs>
+          <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#9eff4a"/>
+            <stop offset="100%" stop-color="#4edfff"/>
+          </linearGradient>
+        </defs>
+        <circle cx="32" cy="32" r="28" fill="#0f2133" stroke="#6ee7ff" stroke-width="2"/>
+        <rect x="25" y="25" width="14" height="14" rx="2" fill="url(#g1)" stroke="#dff7ff" stroke-width="1.5"/>
+        <rect x="7" y="28" width="16" height="8" rx="1.5" fill="#5c8dbf" stroke="#cbe7ff" stroke-width="1"/>
+        <rect x="41" y="28" width="16" height="8" rx="1.5" fill="#5c8dbf" stroke="#cbe7ff" stroke-width="1"/>
+        <line x1="32" y1="39" x2="32" y2="49" stroke="#fef08a" stroke-width="2"/>
+        <circle cx="32" cy="50" r="2" fill="#fde047"/>
+      </svg>
+    `);
+  }
+  if (type === 'aircraft') {
+    return svgDataUri(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+        <circle cx="32" cy="32" r="28" fill="#102a32" stroke="#59e1c1" stroke-width="2"/>
+        <path d="M32 11 L37 25 L53 30 L53 34 L37 39 L32 53 L27 39 L11 34 L11 30 L27 25 Z"
+              fill="#e7f7ff" stroke="#7ed7ff" stroke-width="1.5"/>
+        <rect x="29" y="14" width="6" height="35" rx="2" fill="#8ec5ff" opacity="0.45"/>
+      </svg>
+    `);
+  }
+  return svgDataUri(`
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="28" fill="#0b2433" stroke="#60d9ff" stroke-width="2"/>
+      <path d="M14 39 H50 L44 47 H20 Z" fill="#f1f5f9" stroke="#bde7ff" stroke-width="1.5"/>
+      <rect x="24" y="28" width="16" height="10" rx="1.5" fill="#88b5e6" stroke="#d6efff" stroke-width="1"/>
+      <rect x="29" y="23" width="6" height="5" rx="1" fill="#88b5e6"/>
+      <line x1="14" y1="50" x2="50" y2="50" stroke="#4cc9f0" stroke-width="2" opacity="0.7"/>
+    </svg>
+  `);
+}
+
+const nodeIcon = {
+  leo: buildNodeIcon('leo'),
+  aircraft: buildNodeIcon('aircraft'),
+  ship: buildNodeIcon('ship')
+};
 
 function toCartesian(node) {
   return Cartesian3.fromDegrees(node.lon, node.lat, node.alt_m);
+}
+
+function buildSatelliteOrbitPolyline(node) {
+  if (node.type !== 'leo' || node.vx == null || node.vy == null || node.vz == null) {
+    return null;
+  }
+  const r = new Cartesian3(node.x, node.y, node.z);
+  const v = new Cartesian3(node.vx, node.vy, node.vz);
+  const n = Cartesian3.cross(r, v, new Cartesian3());
+  if (Cartesian3.magnitudeSquared(n) < 1e-6) {
+    return null;
+  }
+  const u = Cartesian3.normalize(r, new Cartesian3());
+  const w = Cartesian3.normalize(Cartesian3.cross(n, u, new Cartesian3()), new Cartesian3());
+  const radius = Cartesian3.magnitude(r);
+  const points = [];
+  for (let i = 0; i <= SAT_ORBIT_SAMPLES; i += 1) {
+    const theta = (2.0 * Math.PI * i) / SAT_ORBIT_SAMPLES;
+    const pu = Cartesian3.multiplyByScalar(u, Math.cos(theta) * radius, new Cartesian3());
+    const pw = Cartesian3.multiplyByScalar(w, Math.sin(theta) * radius, new Cartesian3());
+    points.push(Cartesian3.add(pu, pw, new Cartesian3()));
+  }
+  return points;
+}
+
+function resolveLinkStyle(a, b) {
+  const aSat = a.type === 'leo';
+  const bSat = b.type === 'leo';
+  if (aSat && bSat) {
+    return linkStyle.sat_sat;
+  }
+  if ((aSat && !bSat) || (!aSat && bSat)) {
+    return linkStyle.sat_mobile;
+  }
+  return linkStyle.other;
 }
 
 export function App() {
@@ -37,6 +146,7 @@ export function App() {
   const nodeEntitiesRef = useRef(new Map());
   const trailEntitiesRef = useRef(new Map());
   const trailPointsRef = useRef(new Map());
+  const orbitEntitiesRef = useRef(new Map());
   const linkEntitiesRef = useRef(new Map());
 
   useEffect(() => {
@@ -109,21 +219,26 @@ export function App() {
       const color = typeColor[node.type] || Color.WHITE;
 
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
+      const labelText = node.name || node.id;
+      const labelScale = node.type === 'leo' ? 0.45 : 0.35;
       if (!nodeEntity) {
         nodeEntity = entities.add({
           id: `node-${node.id}`,
-          name: node.id,
+          name: labelText,
           position,
-          point: {
-            pixelSize: node.type === 'leo' ? 7 : 5,
+          billboard: {
+            image: nodeIcon[node.type] || nodeIcon.leo,
+            width: node.type === 'leo' ? 26 : 24,
+            height: node.type === 'leo' ? 26 : 24,
+            verticalOrigin: VerticalOrigin.CENTER,
+            horizontalOrigin: HorizontalOrigin.CENTER,
             color,
-            outlineColor: Color.BLACK,
-            outlineWidth: 1
+            scale: 1.0
           },
           label: {
-            text: node.type === 'leo' ? node.id : '',
-            show: node.type === 'leo',
-            scale: 0.45,
+            text: labelText,
+            show: true,
+            scale: labelScale,
             fillColor: Color.WHITE,
             showBackground: true,
             backgroundColor: Color.BLACK.withAlpha(0.55),
@@ -139,7 +254,8 @@ export function App() {
 
       const trail = trailPointsRef.current.get(node.id) || [];
       trail.push(position);
-      if (trail.length > TRAIL_LEN) {
+      const trailLen = TRAIL_LEN_BY_TYPE[node.type] || 180;
+      if (trail.length > trailLen) {
         trail.shift();
       }
       trailPointsRef.current.set(node.id, trail);
@@ -150,7 +266,7 @@ export function App() {
           id: `trail-${node.id}`,
           polyline: {
             positions: trail,
-            width: 1.5,
+            width: node.type === 'leo' ? 1.4 : 2.1,
             material: color.withAlpha(0.45)
           }
         });
@@ -158,12 +274,45 @@ export function App() {
       } else {
         trailEntity.polyline.positions = trail;
       }
+
+      if (node.type === 'leo') {
+        const orbitPositions = buildSatelliteOrbitPolyline(node);
+        if (orbitPositions) {
+          let orbitEntity = orbitEntitiesRef.current.get(node.id);
+          if (!orbitEntity) {
+            orbitEntity = entities.add({
+              id: `orbit-${node.id}`,
+              polyline: {
+                positions: orbitPositions,
+                width: 1,
+                material: orbitColor[node.orbit_class] || Color.WHITE.withAlpha(0.15)
+              }
+            });
+            orbitEntitiesRef.current.set(node.id, orbitEntity);
+          } else {
+            orbitEntity.polyline.positions = orbitPositions;
+          }
+        }
+      }
     }
 
     for (const [id, ent] of nodeEntitiesRef.current) {
       if (!activeNodeIds.has(id)) {
         entities.remove(ent);
         nodeEntitiesRef.current.delete(id);
+      }
+    }
+    for (const [id, ent] of trailEntitiesRef.current) {
+      if (!activeNodeIds.has(id)) {
+        entities.remove(ent);
+        trailEntitiesRef.current.delete(id);
+        trailPointsRef.current.delete(id);
+      }
+    }
+    for (const [id, ent] of orbitEntitiesRef.current) {
+      if (!activeNodeIds.has(id)) {
+        entities.remove(ent);
+        orbitEntitiesRef.current.delete(id);
       }
     }
 
@@ -180,18 +329,21 @@ export function App() {
       const positions = [toCartesian(a), toCartesian(b)];
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
+      const style = resolveLinkStyle(a, b);
       if (!lineEntity) {
         lineEntity = entities.add({
           id: `link-${linkId}`,
           polyline: {
             positions,
-            width: 1,
-            material: Color.CYAN.withAlpha(0.24)
+            width: style.width,
+            material: style.color
           }
         });
         linkEntitiesRef.current.set(linkId, lineEntity);
       } else {
         lineEntity.polyline.positions = positions;
+        lineEntity.polyline.width = style.width;
+        lineEntity.polyline.material = style.color;
       }
     }
 
@@ -214,6 +366,11 @@ export function App() {
         <p>links: {frame ? frame.metrics.edge_count : 0}</p>
         <p>avg degree: {frame ? frame.metrics.avg_degree.toFixed(2) : '-'}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
+        <div className="legend">
+          <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
+          <div className="legend-item"><span className="swatch sat-sat" />satellite-satellite link</div>
+          <div className="legend-item"><span className="swatch sat-mobile" />satellite-air/ship link</div>
+        </div>
       </div>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>

@@ -44,3 +44,40 @@ body,
   line-height: 1.35;
   color: #dce6f2;
 }
+
+.legend {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  padding-top: 8px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0;
+  font-size: 12px;
+  color: #e9eff8;
+}
+
+.swatch {
+  width: 16px;
+  height: 4px;
+  border-radius: 10px;
+  display: inline-block;
+}
+
+.swatch.orbit {
+  background: #7dff00;
+  box-shadow: 0 0 8px rgba(125, 255, 0, 0.7);
+}
+
+.swatch.sat-sat {
+  background: #ff4fd8;
+  box-shadow: 0 0 8px rgba(255, 79, 216, 0.65);
+}
+
+.swatch.sat-mobile {
+  background: #ff7f11;
+  box-shadow: 0 0 8px rgba(255, 127, 17, 0.65);
+}

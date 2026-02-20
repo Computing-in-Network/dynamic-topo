@@ -1,19 +1,27 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Dict, List
 
 import numpy as np
 from pyproj import Transformer
+from sgp4.api import WGS72, Satrec
+from skyfield.api import EarthSatellite, load
+from skyfield.framelib import itrs
 
 from .storage import create_redis_client
 
 EARTH_RADIUS_M = 6_371_000.0
-EARTH_ROT_RATE = 7.2921150e-5
 NODE_TYPE_LEO = 0
 NODE_TYPE_AIR = 1
 NODE_TYPE_SHIP = 2
+
+try:  # pragma: no cover - optional dependency
+    from global_land_mask import globe as _land_globe  # type: ignore
+except Exception:  # pragma: no cover
+    _land_globe = None
 
 
 @dataclass(frozen=True)
@@ -52,6 +60,9 @@ class SimulationConfig:
     up_hold_s: float = 2.0
     down_hold_s: float = 2.0
 
+    # Optional movement constraints.
+    enforce_ship_ocean_mask: bool = True
+
 
 @dataclass(frozen=True)
 class TickResult:
@@ -59,6 +70,7 @@ class TickResult:
     node_positions_ecef: np.ndarray
     adjacency: np.ndarray
     elapsed_ms: float
+    satellite_velocity_ecef: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +86,8 @@ class TopologyEngine:
     def __init__(self, config: SimulationConfig, seed: int = 42, redis_client=None):
         self.config = config
         self._rng = np.random.default_rng(seed)
+        self._timescale = load.timescale()
+        self._epoch_dt = datetime(2026, 1, 1, tzinfo=timezone.utc)
         self._redis = redis_client if redis_client is not None else create_redis_client(config.redis_url)
         self._lla_to_ecef = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
         self._ecef_to_lla = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
@@ -86,20 +100,112 @@ class TopologyEngine:
     def _init_satellite_state(self) -> None:
         cfg = self.config
         self._sat_count = cfg.leo_polar_count + cfg.leo_inclined_count
-        inclinations_deg = np.concatenate(
+        self._sat_orbit_class = (
+            ["polar"] * cfg.leo_polar_count + ["inclined"] * cfg.leo_inclined_count
+        )
+        self._sat_inclinations_deg = np.concatenate(
             [
                 np.full(cfg.leo_polar_count, 97.6, dtype=np.float64),
                 np.full(cfg.leo_inclined_count, 53.0, dtype=np.float64),
             ]
         )
-        self._sat_inclinations = np.deg2rad(inclinations_deg)
+        mean_motion_rad_min = self._mean_motion_rad_min(cfg.leo_altitude_m)
+        self._satellites: List[EarthSatellite] = []
+        self._satellites.extend(
+            self._build_satellite_group(
+                count=cfg.leo_polar_count,
+                inclination_deg=97.6,
+                satnum_start=10_000,
+                mean_motion_rad_min=mean_motion_rad_min,
+            )
+        )
+        self._satellites.extend(
+            self._build_satellite_group(
+                count=cfg.leo_inclined_count,
+                inclination_deg=53.0,
+                satnum_start=20_000,
+                mean_motion_rad_min=mean_motion_rad_min,
+            )
+        )
 
-        self._sat_radius_m = np.full(self._sat_count, EARTH_RADIUS_M + cfg.leo_altitude_m, dtype=np.float64)
-        self._sat_raan = self._rng.uniform(0.0, 2.0 * np.pi, size=self._sat_count)
-        self._sat_phase = self._rng.uniform(0.0, 2.0 * np.pi, size=self._sat_count)
-
+    def _mean_motion_rad_min(self, altitude_m: float) -> float:
         mu = 3.986004418e14
-        self._sat_angular_rate = np.sqrt(mu / np.power(self._sat_radius_m, 3))
+        semi_major_axis_m = EARTH_RADIUS_M + altitude_m
+        n_rad_s = np.sqrt(mu / np.power(semi_major_axis_m, 3))
+        return float(n_rad_s * 60.0)
+
+    def _build_satellite_group(
+        self,
+        count: int,
+        inclination_deg: float,
+        satnum_start: int,
+        mean_motion_rad_min: float,
+    ) -> List[EarthSatellite]:
+        if count <= 0:
+            return []
+
+        planes = self._choose_plane_count(count)
+        sats_per_plane = int(np.ceil(count / planes))
+        epoch_days = self._days_since_sgp4_epoch(self._epoch_dt)
+        satellites: List[EarthSatellite] = []
+        for idx in range(count):
+            plane = idx % planes
+            slot = idx // planes
+            raan_rad = np.deg2rad((360.0 / planes) * plane)
+            mean_anomaly_rad = np.deg2rad((360.0 / sats_per_plane) * slot)
+
+            satrec = Satrec()
+            satrec.sgp4init(
+                WGS72,
+                "i",
+                satnum_start + idx,
+                epoch_days,
+                0.0,
+                0.0,
+                0.0,
+                0.0001,
+                0.0,
+                np.deg2rad(inclination_deg),
+                mean_anomaly_rad,
+                mean_motion_rad_min,
+                raan_rad,
+            )
+            satellites.append(EarthSatellite.from_satrec(satrec, self._timescale))
+        return satellites
+
+    def _choose_plane_count(self, count: int) -> int:
+        # Choose a near-square plane count for clear orbital grouping.
+        root = int(np.sqrt(count))
+        for p in range(root, 0, -1):
+            if count % p == 0:
+                return p
+        return max(1, root)
+
+    def _days_since_sgp4_epoch(self, dt: datetime) -> float:
+        sgp4_epoch = datetime(1949, 12, 31, tzinfo=timezone.utc)
+        return (dt - sgp4_epoch).total_seconds() / 86400.0
+
+    def _is_land(self, lat_deg: float, lon_deg: float) -> bool:
+        if _land_globe is not None:
+            return bool(_land_globe.is_land(lat_deg, lon_deg))
+        return self._is_land_fallback(lat_deg, lon_deg)
+
+    def _is_land_fallback(self, lat_deg: float, lon_deg: float) -> bool:
+        # Coarse continent envelopes used only when no dedicated land-mask library is installed.
+        envelopes = (
+            (-35.0, 37.0, -18.0, 52.0),   # Africa
+            (-10.0, 40.0, 35.0, 75.0),    # Europe
+            (5.0, 75.0, 25.0, 180.0),     # Asia
+            (15.0, 72.0, -170.0, -50.0),  # North America
+            (-56.0, 13.0, -82.0, -34.0),  # South America
+            (-45.0, -10.0, 113.0, 154.0), # Australia
+            (-85.0, -60.0, -180.0, 180.0),# Antarctica fringe
+            (59.0, 84.0, -74.0, -10.0),   # Greenland
+        )
+        for lat_min, lat_max, lon_min, lon_max in envelopes:
+            if lat_min <= lat_deg <= lat_max and lon_min <= lon_deg <= lon_max:
+                return True
+        return False
 
     def _init_mobile_state(self) -> None:
         cfg = self.config
@@ -119,6 +225,25 @@ class TopologyEngine:
                 np.full(cfg.ship_count, cfg.ship_altitude_m, dtype=np.float64),
             ]
         )
+        self._ship_slice = slice(cfg.aircraft_count, mobile_count)
+        self._mobile_lat0_rad = self._mobile_lat_rad.copy()
+        self._mobile_lon0_rad = self._mobile_lon_rad.copy()
+        self._mobile_last_time_s: float | None = None
+
+        if cfg.enforce_ship_ocean_mask and cfg.ship_count > 0:
+            self._initialize_ships_on_ocean()
+
+    def _initialize_ships_on_ocean(self) -> None:
+        for i in range(self.config.aircraft_count, self.config.aircraft_count + self.config.ship_count):
+            for _ in range(2_000):
+                lat_deg = float(self._rng.uniform(-70.0, 70.0))
+                lon_deg = float(self._rng.uniform(-180.0, 180.0))
+                if not self._is_land(lat_deg, lon_deg):
+                    self._mobile_lat_rad[i] = np.deg2rad(lat_deg)
+                    self._mobile_lon_rad[i] = np.deg2rad(lon_deg)
+                    break
+        self._mobile_lat0_rad = self._mobile_lat_rad.copy()
+        self._mobile_lon0_rad = self._mobile_lon_rad.copy()
 
     def _init_node_meta(self) -> None:
         cfg = self.config
@@ -168,19 +293,23 @@ class TopologyEngine:
         ]
 
     @property
-    def node_ids(self) -> List[str]:
+    def node_display_names(self) -> List[str]:
         cfg = self.config
-        ids: List[str] = []
-        ids.extend([f"L1-{i:03d}" for i in range(cfg.leo_polar_count)])
-        ids.extend([f"L2-{i:03d}" for i in range(cfg.leo_inclined_count)])
-        ids.extend([f"A1-{i:03d}" for i in range(cfg.aircraft_count)])
-        ids.extend([f"S1-{i:03d}" for i in range(cfg.ship_count)])
-        return ids
+        names: List[str] = []
+        names.extend([f"SAT-POLAR-{i + 1:03d}" for i in range(cfg.leo_polar_count)])
+        names.extend([f"SAT-INCL-{i + 1:03d}" for i in range(cfg.leo_inclined_count)])
+        names.extend([f"AIR-{i + 1:03d}" for i in range(cfg.aircraft_count)])
+        names.extend([f"SHIP-{i + 1:03d}" for i in range(cfg.ship_count)])
+        return names
+
+    @property
+    def node_ids(self) -> List[str]:
+        return self.node_display_names
 
     def step(self, sim_time_s: float) -> TickResult:
         start = perf_counter()
 
-        sat_positions = self._satellite_ecef(sim_time_s)
+        sat_positions, sat_velocity = self._satellite_ecef_with_velocity(sim_time_s)
         mobile_positions = self._mobile_ecef(sim_time_s)
         node_positions = np.vstack([sat_positions, mobile_positions])
 
@@ -188,7 +317,13 @@ class TopologyEngine:
         self._write_state_to_redis(sim_time_s, node_positions, adjacency)
 
         elapsed_ms = (perf_counter() - start) * 1000.0
-        return TickResult(sim_time_s=sim_time_s, node_positions_ecef=node_positions, adjacency=adjacency, elapsed_ms=elapsed_ms)
+        return TickResult(
+            sim_time_s=sim_time_s,
+            node_positions_ecef=node_positions,
+            adjacency=adjacency,
+            elapsed_ms=elapsed_ms,
+            satellite_velocity_ecef=sat_velocity,
+        )
 
     def run_steps(self, steps: int, start_time_s: float = 0.0) -> List[TickResult]:
         results: List[TickResult] = []
@@ -207,18 +342,32 @@ class TopologyEngine:
 
         node_types = self.node_type_names
         node_ids = self.node_ids
+        node_labels = self.node_display_names
         nodes: List[dict] = []
         for idx, node_id in enumerate(node_ids):
+            orbit_class = self._sat_orbit_class[idx] if idx < self._sat_count else None
+            category = "satellite" if idx < self._sat_count else ("aircraft" if node_types[idx] == "aircraft" else "ship")
+            vx = vy = vz = None
+            if idx < self._sat_count and result.satellite_velocity_ecef is not None:
+                vx = float(result.satellite_velocity_ecef[idx, 0])
+                vy = float(result.satellite_velocity_ecef[idx, 1])
+                vz = float(result.satellite_velocity_ecef[idx, 2])
             nodes.append(
                 {
                     "id": node_id,
+                    "name": node_labels[idx],
                     "type": node_types[idx],
+                    "category": category,
+                    "orbit_class": orbit_class,
                     "x": float(x[idx]),
                     "y": float(y[idx]),
                     "z": float(z[idx]),
                     "lat": float(lat[idx]),
                     "lon": float(lon[idx]),
                     "alt_m": float(alt[idx]),
+                    "vx": vx,
+                    "vy": vy,
+                    "vz": vz,
                 }
             )
 
@@ -239,34 +388,42 @@ class TopologyEngine:
             metrics=metrics,
         )
 
-    def _satellite_ecef(self, sim_time_s: float) -> np.ndarray:
-        theta = self._sat_phase + self._sat_angular_rate * sim_time_s
-        cos_t = np.cos(theta)
-        sin_t = np.sin(theta)
-
-        x_orb = self._sat_radius_m * cos_t
-        y_orb = self._sat_radius_m * sin_t
-
-        cos_i = np.cos(self._sat_inclinations)
-        sin_i = np.sin(self._sat_inclinations)
-        cos_raan = np.cos(self._sat_raan)
-        sin_raan = np.sin(self._sat_raan)
-
-        x_eci = cos_raan * x_orb - sin_raan * cos_i * y_orb
-        y_eci = sin_raan * x_orb + cos_raan * cos_i * y_orb
-        z_eci = sin_i * y_orb
-
-        gmst = EARTH_ROT_RATE * sim_time_s
-        c = np.cos(gmst)
-        s = np.sin(gmst)
-        x_ecef = c * x_eci + s * y_eci
-        y_ecef = -s * x_eci + c * y_eci
-
-        return np.column_stack([x_ecef, y_ecef, z_eci])
+    def _satellite_ecef_with_velocity(self, sim_time_s: float) -> tuple[np.ndarray, np.ndarray]:
+        current_dt = self._epoch_dt + timedelta(seconds=float(sim_time_s))
+        t = self._timescale.from_datetime(current_dt)
+        positions = np.empty((self._sat_count, 3), dtype=np.float64)
+        velocity = np.empty((self._sat_count, 3), dtype=np.float64)
+        for idx, sat in enumerate(self._satellites):
+            xyz, vel = sat.at(t).frame_xyz_and_velocity(itrs)
+            positions[idx, 0] = float(xyz.m[0])
+            positions[idx, 1] = float(xyz.m[1])
+            positions[idx, 2] = float(xyz.m[2])
+            velocity[idx, 0] = float(vel.m_per_s[0])
+            velocity[idx, 1] = float(vel.m_per_s[1])
+            velocity[idx, 2] = float(vel.m_per_s[2])
+        return positions, velocity
 
     def _mobile_ecef(self, sim_time_s: float) -> np.ndarray:
-        # Great-circle approximation for constant-speed random tracks.
-        dist = self._mobile_speed * sim_time_s
+        if self._mobile_last_time_s is None:
+            self._mobile_last_time_s = float(sim_time_s)
+        else:
+            dt = float(sim_time_s - self._mobile_last_time_s)
+            if dt < 0.0:
+                self._mobile_lat_rad = self._mobile_lat0_rad.copy()
+                self._mobile_lon_rad = self._mobile_lon0_rad.copy()
+                self._mobile_last_time_s = 0.0
+                dt = float(sim_time_s)
+            if dt > 0.0:
+                self._advance_mobile_state(dt)
+                self._mobile_last_time_s = float(sim_time_s)
+
+        lon_deg = np.rad2deg(self._mobile_lon_rad)
+        lat_deg = np.rad2deg(self._mobile_lat_rad)
+        x, y, z = self._lla_to_ecef.transform(lon_deg, lat_deg, self._mobile_altitude)
+        return np.column_stack([x, y, z])
+
+    def _advance_mobile_state(self, dt_s: float) -> None:
+        dist = self._mobile_speed * dt_s
         ang = dist / EARTH_RADIUS_M
 
         lat1 = self._mobile_lat_rad
@@ -285,10 +442,61 @@ class TopologyEngine:
         )
         lon2 = (lon2 + np.pi) % (2.0 * np.pi) - np.pi
 
-        lon_deg = np.rad2deg(lon2)
-        lat_deg = np.rad2deg(lat2)
-        x, y, z = self._lla_to_ecef.transform(lon_deg, lat_deg, self._mobile_altitude)
-        return np.column_stack([x, y, z])
+        if self.config.enforce_ship_ocean_mask and self.config.ship_count > 0:
+            lat2, lon2 = self._adjust_ships_to_ocean(lat1, lon1, lat2, lon2, ang)
+
+        self._mobile_lat_rad = lat2
+        self._mobile_lon_rad = lon2
+
+    def _adjust_ships_to_ocean(
+        self,
+        lat1: np.ndarray,
+        lon1: np.ndarray,
+        lat2: np.ndarray,
+        lon2: np.ndarray,
+        ang: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        aircraft_count = self.config.aircraft_count
+        for local_ship_idx in range(self.config.ship_count):
+            i = aircraft_count + local_ship_idx
+            lat_deg = float(np.rad2deg(lat2[i]))
+            lon_deg = float(np.rad2deg(lon2[i]))
+            if not self._is_land(lat_deg, lon_deg):
+                continue
+
+            # Redirect ship heading around coastlines when next step lands on ground.
+            base_heading = float(self._mobile_heading[i])
+            heading_offsets = (
+                0.30, -0.30, 0.60, -0.60, 0.90, -0.90, 1.2, -1.2, 1.5, -1.5, np.pi
+            )
+            moved = False
+            for off in heading_offsets:
+                new_heading = base_heading + off
+                c_lat = np.arcsin(
+                    np.sin(lat1[i]) * np.cos(ang[i])
+                    + np.cos(lat1[i]) * np.sin(ang[i]) * np.cos(new_heading)
+                )
+                c_lon = lon1[i] + np.arctan2(
+                    np.sin(new_heading) * np.sin(ang[i]) * np.cos(lat1[i]),
+                    np.cos(ang[i]) - np.sin(lat1[i]) * np.sin(c_lat),
+                )
+                c_lon = (c_lon + np.pi) % (2.0 * np.pi) - np.pi
+                c_lat_deg = float(np.rad2deg(c_lat))
+                c_lon_deg = float(np.rad2deg(c_lon))
+                if not self._is_land(c_lat_deg, c_lon_deg):
+                    lat2[i] = c_lat
+                    lon2[i] = c_lon
+                    self._mobile_heading[i] = new_heading
+                    moved = True
+                    break
+
+            if not moved:
+                # If all alternatives fail, hold current position and randomize heading.
+                lat2[i] = lat1[i]
+                lon2[i] = lon1[i]
+                self._mobile_heading[i] = base_heading + float(self._rng.uniform(-np.pi / 2.0, np.pi / 2.0))
+
+        return lat2, lon2
 
     def _adjacency_from_positions(self, positions: np.ndarray) -> np.ndarray:
         los, dist, delta = self._geometry_matrices(positions)

@@ -23,14 +23,14 @@ def test_node_counts_and_names() -> None:
     ids = engine.node_ids
 
     assert len(ids) == 300
-    assert ids[0] == "L1-000"
-    assert ids[99] == "L1-099"
-    assert ids[100] == "L2-000"
-    assert ids[199] == "L2-099"
-    assert ids[200] == "A1-000"
-    assert ids[249] == "A1-049"
-    assert ids[250] == "S1-000"
-    assert ids[299] == "S1-049"
+    assert ids[0] == "SAT-POLAR-001"
+    assert ids[99] == "SAT-POLAR-100"
+    assert ids[100] == "SAT-INCL-001"
+    assert ids[199] == "SAT-INCL-100"
+    assert ids[200] == "AIR-001"
+    assert ids[249] == "AIR-050"
+    assert ids[250] == "SHIP-001"
+    assert ids[299] == "SHIP-050"
 
 
 def test_1hz_step_progression() -> None:
@@ -126,6 +126,23 @@ def test_node_types_are_mapped_correctly() -> None:
     assert np.all(engine._type_codes[200:250] == NODE_TYPE_AIR)
 
 
+def test_leo_orbit_groups_have_expected_inclinations() -> None:
+    engine = build_engine()
+    incl = engine._sat_inclinations_deg
+    assert np.allclose(incl[:100], 97.6)
+    assert np.allclose(incl[100:200], 53.0)
+
+
+def test_satellite_positions_are_not_collapsed_at_epoch() -> None:
+    engine = build_engine()
+    result = engine.step(0.0)
+    sat = result.node_positions_ecef[:200]
+    # Round to meter-level and require wide spread to catch accidental orbital collapse.
+    rounded = np.round(sat, 0)
+    unique = np.unique(rounded, axis=0)
+    assert unique.shape[0] > 180
+
+
 def test_build_frame_contains_nodes_links_and_metrics() -> None:
     engine = build_engine()
     engine.step(0.0)  # warm hysteresis
@@ -138,3 +155,16 @@ def test_build_frame_contains_nodes_links_and_metrics() -> None:
     assert "avg_degree" in frame.metrics
     assert "max_degree" in frame.metrics
     assert all("id" in node and "lat" in node and "lon" in node for node in frame.nodes)
+    assert frame.nodes[0]["orbit_class"] == "polar"
+    assert frame.nodes[100]["orbit_class"] == "inclined"
+    assert frame.nodes[200]["category"] == "aircraft"
+    assert frame.nodes[0]["vx"] is not None
+
+
+def test_ships_remain_on_ocean_mask_for_multiple_steps() -> None:
+    engine = build_engine()
+    for t in range(0, 60, 5):
+        result = engine.step(float(t))
+        frame = engine.build_frame(result)
+        for node in frame.nodes[250:300]:
+            assert not engine._is_land(node["lat"], node["lon"])
