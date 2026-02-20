@@ -49,6 +49,7 @@ class SimulationConfig:
 
     # Capacity constraints.
     max_neighbors_leo: int = 10
+    sat_isl_ports: int = 4
     max_neighbors_air: int = 4
     max_neighbors_ship: int = 3
 
@@ -100,9 +101,27 @@ class TopologyEngine:
     def _init_satellite_state(self) -> None:
         cfg = self.config
         self._sat_count = cfg.leo_polar_count + cfg.leo_inclined_count
+        self._polar_count = cfg.leo_polar_count
+        self._incl_count = cfg.leo_inclined_count
         self._sat_orbit_class = (
             ["polar"] * cfg.leo_polar_count + ["inclined"] * cfg.leo_inclined_count
         )
+        self._sat_orbit_code = np.concatenate(
+            [
+                np.zeros(cfg.leo_polar_count, dtype=np.int8),
+                np.ones(cfg.leo_inclined_count, dtype=np.int8),
+            ]
+        )
+        self._polar_planes = self._choose_plane_count(cfg.leo_polar_count) if cfg.leo_polar_count > 0 else 0
+        self._incl_planes = self._choose_plane_count(cfg.leo_inclined_count) if cfg.leo_inclined_count > 0 else 0
+        self._polar_sats_per_plane = (
+            cfg.leo_polar_count // self._polar_planes if self._polar_planes > 0 else 0
+        )
+        self._incl_sats_per_plane = (
+            cfg.leo_inclined_count // self._incl_planes if self._incl_planes > 0 else 0
+        )
+        self._polar_sat_idx = np.arange(cfg.leo_polar_count, dtype=np.int32)
+        self._all_sat_idx = np.arange(self._sat_count, dtype=np.int32)
         self._sat_inclinations_deg = np.concatenate(
             [
                 np.full(cfg.leo_polar_count, 97.6, dtype=np.float64),
@@ -515,9 +534,96 @@ class TopologyEngine:
         beam_ok = self._satellite_beam_mask(positions, delta)
         candidate &= beam_ok
 
-        capped = self._apply_capacity_constraints(candidate, dist)
-        stable = self._stabilize_links(capped)
+        sat_backbone = self._build_satellite_backbone(candidate, dist)
+        candidate_wo_sat_sat = candidate.copy()
+        candidate_wo_sat_sat[: self._sat_count, : self._sat_count] = False
+
+        capped = self._apply_capacity_constraints(candidate_wo_sat_sat, dist)
+        combined = capped | sat_backbone
+        np.fill_diagonal(combined, False)
+        stable = self._stabilize_links(combined)
         return stable
+
+    def _same_plane_sat_neighbors(self, sat_idx: int) -> tuple[int, int]:
+        if sat_idx < self._polar_count:
+            offset = 0
+            planes = self._polar_planes
+            sats_per_plane = self._polar_sats_per_plane
+            local = sat_idx
+        else:
+            offset = self._polar_count
+            planes = self._incl_planes
+            sats_per_plane = self._incl_sats_per_plane
+            local = sat_idx - self._polar_count
+
+        if planes <= 0 or sats_per_plane <= 1:
+            return sat_idx, sat_idx
+
+        plane = local % planes
+        slot = local // planes
+        prev_slot = (slot - 1) % sats_per_plane
+        next_slot = (slot + 1) % sats_per_plane
+        prev_idx = offset + prev_slot * planes + plane
+        next_idx = offset + next_slot * planes + plane
+        return int(prev_idx), int(next_idx)
+
+    def _build_satellite_backbone(self, candidate: np.ndarray, dist: np.ndarray) -> np.ndarray:
+        n = self.config.total_nodes
+        selected = np.zeros((n, n), dtype=bool)
+        if self._sat_count == 0:
+            return selected
+
+        sat_adj = selected[: self._sat_count, : self._sat_count]
+        sat_degree = np.zeros(self._sat_count, dtype=np.int16)
+        target_deg = int(max(0, self.config.sat_isl_ports))
+
+        mandatory_edges: set[tuple[int, int]] = set()
+        for i in range(self._sat_count):
+            a, b = self._same_plane_sat_neighbors(i)
+            if a != i:
+                mandatory_edges.add((min(i, a), max(i, a)))
+            if b != i:
+                mandatory_edges.add((min(i, b), max(i, b)))
+
+        for i, j in mandatory_edges:
+            sat_adj[i, j] = True
+            sat_adj[j, i] = True
+            sat_degree[i] += 1
+            sat_degree[j] += 1
+
+        for _ in range(2):
+            for i in range(self._sat_count):
+                while sat_degree[i] < target_deg:
+                    if self._sat_orbit_code[i] == 0:
+                        pool = self._polar_sat_idx
+                    else:
+                        pool = self._all_sat_idx
+
+                    best_j = -1
+                    best_d = np.inf
+                    for j in pool:
+                        jj = int(j)
+                        if jj == i or sat_adj[i, jj]:
+                            continue
+                        if not candidate[i, jj]:
+                            continue
+                        if sat_degree[jj] >= target_deg:
+                            continue
+                        dij = float(dist[i, jj])
+                        if dij < best_d:
+                            best_d = dij
+                            best_j = jj
+
+                    if best_j < 0:
+                        break
+
+                    sat_adj[i, best_j] = True
+                    sat_adj[best_j, i] = True
+                    sat_degree[i] += 1
+                    sat_degree[best_j] += 1
+
+        np.fill_diagonal(selected, False)
+        return selected
 
     def _geometry_matrices(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         p1 = positions[:, np.newaxis, :]
@@ -566,8 +672,8 @@ class TopologyEngine:
     def _apply_capacity_constraints(self, candidate: np.ndarray, dist: np.ndarray) -> np.ndarray:
         n = self.config.total_nodes
         selected = np.zeros((n, n), dtype=bool)
-        degree = np.zeros(n, dtype=np.int16)
-        sat_mobile_edges = np.zeros(self._sat_count, dtype=np.int16)
+        mobile_degree = np.zeros(n, dtype=np.int16)
+        sat_sat_degree = np.zeros(self._sat_count, dtype=np.int16)
 
         iu, ju = np.triu_indices(n, k=1)
         valid = candidate[iu, ju]
@@ -584,26 +690,32 @@ class TopologyEngine:
         for k in order:
             i = int(ei[k])
             j = int(ej[k])
-            if degree[i] >= self._degree_caps[i] or degree[j] >= self._degree_caps[j]:
-                continue
-
             i_is_sat = i < self._sat_count
             j_is_sat = j < self._sat_count
 
-            if i_is_sat and not j_is_sat and sat_mobile_edges[i] >= self.config.sat_beam_slots:
-                continue
-            if j_is_sat and not i_is_sat and sat_mobile_edges[j] >= self.config.sat_beam_slots:
-                continue
+            # ISL links are limited by hardware ports on each satellite.
+            if i_is_sat and j_is_sat:
+                if sat_sat_degree[i] >= self.config.sat_isl_ports:
+                    continue
+                if sat_sat_degree[j] >= self.config.sat_isl_ports:
+                    continue
+            # Mobile-mobile links keep degree caps to avoid dense local meshes.
+            elif not i_is_sat and not j_is_sat:
+                if mobile_degree[i] >= self._degree_caps[i]:
+                    continue
+                if mobile_degree[j] >= self._degree_caps[j]:
+                    continue
+            # Satellite-mobile links are intentionally not capped by count.
 
             selected[i, j] = True
             selected[j, i] = True
-            degree[i] += 1
-            degree[j] += 1
 
-            if i_is_sat and not j_is_sat:
-                sat_mobile_edges[i] += 1
-            if j_is_sat and not i_is_sat:
-                sat_mobile_edges[j] += 1
+            if i_is_sat and j_is_sat:
+                sat_sat_degree[i] += 1
+                sat_sat_degree[j] += 1
+            elif not i_is_sat and not j_is_sat:
+                mobile_degree[i] += 1
+                mobile_degree[j] += 1
 
         np.fill_diagonal(selected, False)
         return selected

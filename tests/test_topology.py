@@ -51,15 +51,50 @@ def test_topology_matrix_is_symmetric_and_diagonal_zero() -> None:
     assert not np.any(np.diag(adj))
 
 
-def test_degree_caps_respected() -> None:
+def test_satellite_satellite_degree_respects_isl_ports() -> None:
     engine = build_engine()
     # Two steps to pass 2s hysteresis and expose active links.
     engine.step(0.0)
     result = engine.step(1.0)
 
-    degrees = result.adjacency.sum(axis=1)
-    caps = engine._degree_caps  # internal contract for capacity enforcement
-    assert np.all(degrees <= caps)
+    sat_adj = result.adjacency[:200, :200]
+    sat_sat_degree = sat_adj.sum(axis=1)
+    assert np.all(sat_sat_degree <= engine.config.sat_isl_ports)
+
+
+def test_satellite_keeps_same_plane_neighbors() -> None:
+    engine = build_engine()
+    engine.step(0.0)
+    result = engine.step(1.0)
+
+    sat_adj = result.adjacency[:200, :200]
+    for i in range(200):
+        a, b = engine._same_plane_sat_neighbors(i)
+        if a != i:
+            assert bool(sat_adj[i, a])
+        if b != i:
+            assert bool(sat_adj[i, b])
+
+
+def test_satellite_mobile_edges_are_not_capped_by_count() -> None:
+    cfg = SimulationConfig(
+        total_nodes=7,
+        leo_polar_count=1,
+        leo_inclined_count=0,
+        aircraft_count=6,
+        ship_count=0,
+        sat_isl_ports=4,
+    )
+    engine = TopologyEngine(cfg, seed=1, redis_client=InMemoryRedis())
+
+    candidate = np.zeros((7, 7), dtype=bool)
+    for j in range(1, 7):
+        candidate[0, j] = True
+        candidate[j, 0] = True
+    dist = np.ones((7, 7), dtype=np.float64)
+
+    selected = engine._apply_capacity_constraints(candidate, dist)
+    assert int(selected[0].sum()) == 6
 
 
 def test_satellite_beam_rejects_far_off_nadir_target() -> None:
