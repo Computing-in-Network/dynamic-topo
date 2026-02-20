@@ -1,8 +1,21 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Cartesian2, Cartesian3, Color, Math as CesiumMath, VerticalOrigin } from 'cesium';
-import { CameraFlyTo, Entity, PolylineGraphics, Viewer } from 'resium';
+import { useEffect, useRef, useState } from 'react';
+import {
+  Cartesian2,
+  Cartesian3,
+  Color,
+  EllipsoidTerrainProvider,
+  LabelStyle,
+  OpenStreetMapImageryProvider,
+  TileMapServiceImageryProvider,
+  VerticalOrigin,
+  Viewer
+} from 'cesium';
 
-const WS_URL = import.meta.env.VITE_TOPO_WS_URL || 'ws://localhost:8765';
+const defaultWsUrl = (() => {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${window.location.hostname}:8765`;
+})();
+const WS_URL = import.meta.env.VITE_TOPO_WS_URL || defaultWsUrl;
 const TRAIL_LEN = 120;
 
 const typeColor = {
@@ -18,7 +31,56 @@ function toCartesian(node) {
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
-  const trailsRef = useRef(new Map());
+
+  const containerRef = useRef(null);
+  const viewerRef = useRef(null);
+  const nodeEntitiesRef = useRef(new Map());
+  const trailEntitiesRef = useRef(new Map());
+  const trailPointsRef = useRef(new Map());
+  const linkEntitiesRef = useRef(new Map());
+
+  useEffect(() => {
+    if (!containerRef.current || viewerRef.current) {
+      return;
+    }
+
+    const viewer = new Viewer(containerRef.current, {
+      imageryProvider: false,
+      terrainProvider: new EllipsoidTerrainProvider(),
+      animation: false,
+      timeline: false,
+      baseLayerPicker: false,
+      geocoder: false,
+      sceneModePicker: false,
+      homeButton: false,
+      navigationHelpButton: false,
+      selectionIndicator: false,
+      infoBox: false
+    });
+
+    viewer.scene.globe.baseColor = Color.fromCssColorString('#123b58');
+    const localTextureUrl = `${(window.CESIUM_BASE_URL || '/cesium').replace(/\/$/, '')}/Assets/Textures/NaturalEarthII`;
+    TileMapServiceImageryProvider.fromUrl(localTextureUrl)
+      .then((provider) => {
+        viewer.imageryLayers.addImageryProvider(provider);
+      })
+      .catch(() => {
+        viewer.imageryLayers.addImageryProvider(
+          new OpenStreetMapImageryProvider({ url: 'https://tile.openstreetmap.org/' })
+        );
+      });
+    viewer.camera.flyTo({
+      destination: Cartesian3.fromDegrees(110, 25, 22_000_000),
+      duration: 0
+    });
+
+    viewerRef.current = viewer;
+
+    return () => {
+      viewer.destroy();
+      viewerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
@@ -28,44 +90,118 @@ export function App() {
     ws.onmessage = (evt) => {
       const payload = JSON.parse(evt.data);
       setFrame(payload);
-      const map = trailsRef.current;
-      for (const node of payload.nodes) {
-        const list = map.get(node.id) || [];
-        list.push(toCartesian(node));
-        if (list.length > TRAIL_LEN) {
-          list.shift();
-        }
-        map.set(node.id, list);
-      }
     };
     return () => ws.close();
   }, []);
 
-  const nodeMap = useMemo(() => {
-    if (!frame) {
-      return new Map();
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !frame) {
+      return;
     }
-    return new Map(frame.nodes.map((n) => [n.id, n]));
-  }, [frame]);
 
-  const linkLines = useMemo(() => {
-    if (!frame) {
-      return [];
+    const entities = viewer.entities;
+    const activeNodeIds = new Set();
+
+    for (const node of frame.nodes) {
+      activeNodeIds.add(node.id);
+      const position = toCartesian(node);
+      const color = typeColor[node.type] || Color.WHITE;
+
+      let nodeEntity = nodeEntitiesRef.current.get(node.id);
+      if (!nodeEntity) {
+        nodeEntity = entities.add({
+          id: `node-${node.id}`,
+          name: node.id,
+          position,
+          point: {
+            pixelSize: node.type === 'leo' ? 7 : 5,
+            color,
+            outlineColor: Color.BLACK,
+            outlineWidth: 1
+          },
+          label: {
+            text: node.type === 'leo' ? node.id : '',
+            show: node.type === 'leo',
+            scale: 0.45,
+            fillColor: Color.WHITE,
+            showBackground: true,
+            backgroundColor: Color.BLACK.withAlpha(0.55),
+            style: LabelStyle.FILL,
+            verticalOrigin: VerticalOrigin.BOTTOM,
+            pixelOffset: new Cartesian2(0, -12)
+          }
+        });
+        nodeEntitiesRef.current.set(node.id, nodeEntity);
+      } else {
+        nodeEntity.position = position;
+      }
+
+      const trail = trailPointsRef.current.get(node.id) || [];
+      trail.push(position);
+      if (trail.length > TRAIL_LEN) {
+        trail.shift();
+      }
+      trailPointsRef.current.set(node.id, trail);
+
+      let trailEntity = trailEntitiesRef.current.get(node.id);
+      if (!trailEntity) {
+        trailEntity = entities.add({
+          id: `trail-${node.id}`,
+          polyline: {
+            positions: trail,
+            width: 1.5,
+            material: color.withAlpha(0.45)
+          }
+        });
+        trailEntitiesRef.current.set(node.id, trailEntity);
+      } else {
+        trailEntity.polyline.positions = trail;
+      }
     }
-    const out = [];
+
+    for (const [id, ent] of nodeEntitiesRef.current) {
+      if (!activeNodeIds.has(id)) {
+        entities.remove(ent);
+        nodeEntitiesRef.current.delete(id);
+      }
+    }
+
+    const activeLinks = new Set();
+    const nodeMap = new Map(frame.nodes.map((n) => [n.id, n]));
     for (const edge of frame.links) {
       const a = nodeMap.get(edge.a);
       const b = nodeMap.get(edge.b);
       if (!a || !b) {
         continue;
       }
-      out.push({
-        id: `${edge.a}-${edge.b}`,
-        positions: [toCartesian(a), toCartesian(b)]
-      });
+      const linkId = `${edge.a}-${edge.b}`;
+      activeLinks.add(linkId);
+      const positions = [toCartesian(a), toCartesian(b)];
+
+      let lineEntity = linkEntitiesRef.current.get(linkId);
+      if (!lineEntity) {
+        lineEntity = entities.add({
+          id: `link-${linkId}`,
+          polyline: {
+            positions,
+            width: 1,
+            material: Color.CYAN.withAlpha(0.24)
+          }
+        });
+        linkEntitiesRef.current.set(linkId, lineEntity);
+      } else {
+        lineEntity.polyline.positions = positions;
+      }
     }
-    return out;
-  }, [frame, nodeMap]);
+
+    for (const [id, ent] of linkEntitiesRef.current) {
+      if (!activeLinks.has(id)) {
+        entities.remove(ent);
+        linkEntitiesRef.current.delete(id);
+      }
+    }
+  }, [frame]);
 
   return (
     <div className="app-shell">
@@ -79,82 +215,7 @@ export function App() {
         <p>avg degree: {frame ? frame.metrics.avg_degree.toFixed(2) : '-'}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
       </div>
-
-      <Viewer
-        full
-        animation={false}
-        timeline={false}
-        shouldAnimate
-        selectionIndicator={false}
-        baseLayerPicker={false}
-        geocoder={false}
-        sceneModePicker={false}
-        homeButton={false}
-        navigationHelpButton={false}
-      >
-        <CameraFlyTo
-          duration={0}
-          destination={Cartesian3.fromDegrees(110, 25, 22_000_000)}
-          orientation={{
-            heading: 0,
-            pitch: CesiumMath.toRadians(-65),
-            roll: 0
-          }}
-        />
-
-        {frame &&
-          frame.nodes.map((node) => {
-            const trail = trailsRef.current.get(node.id) || [];
-            if (trail.length < 2) {
-              return null;
-            }
-            return (
-              <Entity key={node.id} name={node.id} position={toCartesian(node)}>
-                <PolylineGraphics
-                  positions={trail}
-                  width={1.5}
-                  material={(typeColor[node.type] || Color.WHITE).withAlpha(0.45)}
-                />
-              </Entity>
-            );
-          })}
-
-        {frame &&
-          frame.nodes.map((node) => (
-            <Entity
-              key={`${node.id}-point`}
-              name={node.id}
-              position={toCartesian(node)}
-              point={{
-                pixelSize: node.type === 'leo' ? 7 : 5,
-                color: typeColor[node.type] || Color.WHITE,
-                outlineColor: Color.BLACK,
-                outlineWidth: 1
-              }}
-              label={{
-                text: node.id,
-                show: node.type === 'leo',
-                scale: 0.45,
-                fillColor: Color.WHITE,
-                showBackground: true,
-                backgroundColor: Color.BLACK.withAlpha(0.55),
-                verticalOrigin: VerticalOrigin.BOTTOM,
-                pixelOffset: new Cartesian2(0, -12)
-              }}
-            />
-          ))}
-
-        {linkLines.map((line) => (
-          <Entity
-            key={line.id}
-            polyline={{
-              positions: line.positions,
-              width: 1,
-              material: Color.CYAN.withAlpha(0.24)
-            }}
-          />
-        ))}
-      </Viewer>
+      <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
   );
 }
