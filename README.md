@@ -79,3 +79,5 @@ uv run python -m pytest -q
    - 前端：`http://<DEPLOY_HOST>:8080`
    - 后端 WS：`ws://<DEPLOY_HOST>:8765`
    - 在部署机查看容器：`docker ps`
+
+这个文件需要修改的
