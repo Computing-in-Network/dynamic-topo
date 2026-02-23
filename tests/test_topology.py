@@ -206,9 +206,17 @@ def test_build_frame_contains_nodes_links_and_metrics() -> None:
     assert "avg_degree" in frame.metrics
     assert "max_degree" in frame.metrics
     assert "link_flip_count_tick" in frame.metrics
+    assert "component_count" in frame.metrics
+    assert "largest_component_size" in frame.metrics
+    assert "largest_component_ratio" in frame.metrics
+    assert "diameter_approx" in frame.metrics
     assert "mobile_connected_count" in frame.metrics
     assert "mobile_connected_ratio" in frame.metrics
     assert 0.0 <= frame.metrics["mobile_connected_ratio"] <= 1.0
+    assert frame.metrics["component_count"] >= 1
+    assert 1 <= frame.metrics["largest_component_size"] <= 300
+    assert 0.0 < frame.metrics["largest_component_ratio"] <= 1.0
+    assert frame.metrics["diameter_approx"] >= 0
     assert all("id" in node and "lat" in node and "lon" in node for node in frame.nodes)
     assert frame.nodes[0]["orbit_class"] == "polar"
     assert frame.nodes[100]["orbit_class"] == "inclined"
