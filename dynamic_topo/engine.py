@@ -62,6 +62,8 @@ class SimulationConfig:
     # Link state hysteresis.
     up_hold_s: float = 2.0
     down_hold_s: float = 2.0
+    min_link_up_s: float = 0.0
+    min_link_down_s: float = 0.0
 
     # Optional movement constraints.
     enforce_ship_ocean_mask: bool = True
@@ -315,6 +317,8 @@ class TopologyEngine:
         self._adj_prev = np.zeros((n, n), dtype=bool)
         self._up_count = np.zeros((n, n), dtype=np.uint8)
         self._down_count = np.zeros((n, n), dtype=np.uint8)
+        self._state_age_ticks = np.full((n, n), np.uint16(65535), dtype=np.uint16)
+        self._last_flip_count = 0
         self._apply_link_policy(reset_hysteresis=True)
 
     def _apply_link_policy(self, reset_hysteresis: bool) -> None:
@@ -337,10 +341,14 @@ class TopologyEngine:
         self._beam_cos_threshold = float(np.cos(np.deg2rad(p.sat_beam_half_angle_deg)))
         self._up_hold_ticks = max(1, int(np.ceil(p.up_hold_s / self.config.timestep_s)))
         self._down_hold_ticks = max(1, int(np.ceil(p.down_hold_s / self.config.timestep_s)))
+        self._min_link_up_ticks = max(0, int(np.ceil(p.min_link_up_s / self.config.timestep_s)))
+        self._min_link_down_ticks = max(0, int(np.ceil(p.min_link_down_s / self.config.timestep_s)))
 
         if reset_hysteresis:
             self._up_count.fill(0)
             self._down_count.fill(0)
+            self._state_age_ticks.fill(np.uint16(65535))
+            self._last_flip_count = 0
 
     @property
     def node_type_names(self) -> List[str]:
@@ -440,6 +448,7 @@ class TopologyEngine:
             "edge_count": int(len(links)),
             "avg_degree": float(np.mean(degree)),
             "max_degree": int(np.max(degree)),
+            "link_flip_count_tick": int(self._last_flip_count),
         }
         if self.config.aircraft_count + self.config.ship_count > 0:
             mobile_degree = degree[self._sat_count :]
@@ -785,13 +794,27 @@ class TopologyEngine:
 
         self._up_count = np.where(~prev & candidate, np.minimum(self._up_count + 1, 255), 0).astype(np.uint8)
         self._down_count = np.where(prev & ~candidate, np.minimum(self._down_count + 1, 255), 0).astype(np.uint8)
+        age_next = self._state_age_ticks.astype(np.uint32) + 1
+        self._state_age_ticks = np.minimum(age_next, 65535).astype(np.uint16)
 
         new_adj = prev.copy()
-        promote = (~prev) & (self._up_count >= self._up_hold_ticks)
-        demote = prev & (self._down_count >= self._down_hold_ticks)
+        promote = (
+            (~prev)
+            & (self._up_count >= self._up_hold_ticks)
+            & (self._state_age_ticks >= self._min_link_down_ticks)
+        )
+        demote = (
+            prev
+            & (self._down_count >= self._down_hold_ticks)
+            & (self._state_age_ticks >= self._min_link_up_ticks)
+        )
 
         new_adj[promote] = True
         new_adj[demote] = False
+
+        flips = promote | demote
+        self._last_flip_count = int(np.count_nonzero(np.triu(flips, k=1)))
+        self._state_age_ticks[flips] = 0
 
         np.fill_diagonal(new_adj, False)
         new_adj = np.logical_or(new_adj, new_adj.T)
