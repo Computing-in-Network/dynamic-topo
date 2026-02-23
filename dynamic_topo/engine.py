@@ -830,6 +830,7 @@ class TopologyEngine:
         n = self.config.total_nodes
         selected = np.zeros((n, n), dtype=bool)
         mobile_degree = np.zeros(n, dtype=np.int16)
+        mobile_sat_degree = np.zeros(n, dtype=np.int16)
         sat_sat_degree = np.zeros(self._sat_count, dtype=np.int16)
 
         iu, ju = np.triu_indices(n, k=1)
@@ -862,7 +863,11 @@ class TopologyEngine:
                     continue
                 if mobile_degree[j] >= self._degree_caps[j]:
                     continue
-            # Satellite-mobile links are intentionally not capped by count.
+            else:
+                # Mobile nodes can connect to at most one satellite.
+                mobile_idx = j if i_is_sat else i
+                if mobile_sat_degree[mobile_idx] >= 1:
+                    continue
 
             selected[i, j] = True
             selected[j, i] = True
@@ -873,6 +878,9 @@ class TopologyEngine:
             elif not i_is_sat and not j_is_sat:
                 mobile_degree[i] += 1
                 mobile_degree[j] += 1
+            else:
+                mobile_idx = j if i_is_sat else i
+                mobile_sat_degree[mobile_idx] += 1
 
         np.fill_diagonal(selected, False)
         return selected
