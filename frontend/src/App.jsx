@@ -69,6 +69,7 @@ const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
 const FRAME_QUEUE_MAX = 600;
 const SPEED_OPTIONS = [0.5, 1, 2];
+const ORBIT_UPDATE_INTERVAL_TICKS = 4;
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -216,6 +217,7 @@ export function App() {
   const trailPointsRef = useRef(new Map());
   const orbitEntitiesRef = useRef(new Map());
   const linkEntitiesRef = useRef(new Map());
+  const linkVisualStateRef = useRef(new Map());
   const pickHandlerRef = useRef(null);
   const nodeStateRef = useRef(new Map());
   const linkStateRef = useRef(new Map());
@@ -223,6 +225,7 @@ export function App() {
   const lastFrameAtRef = useRef(0);
   const frameTimestampsRef = useRef([]);
   const frameQueueRef = useRef([]);
+  const orbitCacheRef = useRef(new Map());
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -411,10 +414,13 @@ export function App() {
 
     const entities = viewer.entities;
     const activeNodeIds = new Set();
+    const nodePositionMap = new Map();
+    const frameTick = Math.floor(frame.sim_time_s ?? 0);
 
     for (const node of frame.nodes) {
       activeNodeIds.add(node.id);
       const position = toCartesian(node);
+      nodePositionMap.set(node.id, position);
       const color = typeColor[node.type] || Color.WHITE;
       const nodeVisible = isNodeVisible(node, layerPrefs);
       nodeVisibilityRef.current.set(node.id, nodeVisible);
@@ -487,7 +493,24 @@ export function App() {
       trailEntity.show = nodeVisible && layerPrefs.showTrails;
 
       if (node.type === 'leo') {
-        const orbitPositions = buildSatelliteOrbitPolyline(node);
+        let orbitPositions = null;
+        const orbitCache = orbitCacheRef.current.get(node.id);
+        const shouldRecompute =
+          !orbitCache ||
+          orbitCache.orbitClass !== node.orbit_class ||
+          frameTick - orbitCache.tick >= ORBIT_UPDATE_INTERVAL_TICKS;
+        if (shouldRecompute) {
+          orbitPositions = buildSatelliteOrbitPolyline(node);
+          if (orbitPositions) {
+            orbitCacheRef.current.set(node.id, {
+              orbitClass: node.orbit_class,
+              tick: frameTick,
+              positions: orbitPositions
+            });
+          }
+        } else {
+          orbitPositions = orbitCache.positions;
+        }
         if (orbitPositions) {
           let orbitEntity = orbitEntitiesRef.current.get(node.id);
           if (!orbitEntity) {
@@ -525,6 +548,7 @@ export function App() {
       if (!activeNodeIds.has(id)) {
         entities.remove(ent);
         orbitEntitiesRef.current.delete(id);
+        orbitCacheRef.current.delete(id);
       }
     }
 
@@ -542,7 +566,12 @@ export function App() {
       degreeCount.set(edge.b, (degreeCount.get(edge.b) || 0) + 1);
       const linkId = `${edge.a}-${edge.b}`;
       activeLinks.add(linkId);
-      const positions = [toCartesian(a), toCartesian(b)];
+      const pa = nodePositionMap.get(a.id);
+      const pb = nodePositionMap.get(b.id);
+      if (!pa || !pb) {
+        continue;
+      }
+      const positions = [pa, pb];
       const selectedLink = selected?.kind === 'link' && selected.id === linkId;
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
@@ -565,18 +594,37 @@ export function App() {
           }
         });
         linkEntitiesRef.current.set(linkId, lineEntity);
+        linkVisualStateRef.current.set(linkId, {
+          width: style.width,
+          selected: selectedLink,
+          kind: linkKind
+        });
       } else {
         lineEntity.polyline.positions = positions;
       }
-      lineEntity.polyline.width = selectedLink ? style.width + 1.6 : style.width;
-      lineEntity.polyline.material = selectedLink ? SELECTED_LINK_COLOR : style.color;
+      const visual = linkVisualStateRef.current.get(linkId);
+      const expectedWidth = selectedLink ? style.width + 1.6 : style.width;
+      const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
+      if (widthChanged) {
+        lineEntity.polyline.width = expectedWidth;
+      }
+      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind;
+      if (materialChanged) {
+        lineEntity.polyline.material = selectedLink ? SELECTED_LINK_COLOR : style.color;
+      }
       lineEntity.show = visible;
+      linkVisualStateRef.current.set(linkId, {
+        width: expectedWidth,
+        selected: selectedLink,
+        kind: linkKind
+      });
     }
 
     for (const [id, ent] of linkEntitiesRef.current) {
       if (!activeLinks.has(id)) {
         entities.remove(ent);
         linkEntitiesRef.current.delete(id);
+        linkVisualStateRef.current.delete(id);
       }
     }
 
