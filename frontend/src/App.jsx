@@ -64,6 +64,9 @@ const defaultLayerPrefs = {
 };
 const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
+const STALE_WARN_MS = 2500;
+const STALE_ERROR_MS = 5000;
+const INGEST_FPS_WARN = 0.7;
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -183,6 +186,10 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [hoverInfo, setHoverInfo] = useState(null);
   const [selected, setSelected] = useState(null);
+  const [runtimeHealth, setRuntimeHealth] = useState({
+    stalenessMs: 0,
+    ingestFps: 0
+  });
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -206,6 +213,8 @@ export function App() {
   const nodeStateRef = useRef(new Map());
   const linkStateRef = useRef(new Map());
   const nodeVisibilityRef = useRef(new Map());
+  const lastFrameAtRef = useRef(0);
+  const frameTimestampsRef = useRef([]);
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -317,15 +326,38 @@ export function App() {
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      lastFrameAtRef.current = Date.now();
+      frameTimestampsRef.current = [];
+    };
     ws.onclose = () => setConnected(false);
     ws.onerror = () => setConnected(false);
     ws.onmessage = (evt) => {
+      const now = Date.now();
+      lastFrameAtRef.current = now;
+      frameTimestampsRef.current.push(now);
       const payload = JSON.parse(evt.data);
       setFrame(payload);
     };
     return () => ws.close();
   }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const stamps = frameTimestampsRef.current.filter((t) => now - t <= 10_000);
+      frameTimestampsRef.current = stamps;
+      let ingestFps = 0;
+      if (stamps.length >= 2) {
+        const spanMs = Math.max(1, stamps[stamps.length - 1] - stamps[0]);
+        ingestFps = ((stamps.length - 1) * 1000) / spanMs;
+      }
+      const stalenessMs = connected ? Math.max(0, now - (lastFrameAtRef.current || now)) : 0;
+      setRuntimeHealth({ stalenessMs, ingestFps });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [connected]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -532,12 +564,33 @@ export function App() {
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
+  const alerts = [];
+  if (!connected) {
+    alerts.push({ level: 'error', text: 'WebSocket 已断开' });
+  }
+  if (connected && runtimeHealth.stalenessMs >= STALE_ERROR_MS) {
+    alerts.push({ level: 'error', text: `数据延迟过高：${(runtimeHealth.stalenessMs / 1000).toFixed(1)}s` });
+  } else if (connected && runtimeHealth.stalenessMs >= STALE_WARN_MS) {
+    alerts.push({ level: 'warn', text: `数据延迟偏高：${(runtimeHealth.stalenessMs / 1000).toFixed(1)}s` });
+  }
+  if (connected && runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN) {
+    alerts.push({ level: 'warn', text: `帧率偏低：${runtimeHealth.ingestFps.toFixed(2)} fps` });
+  }
 
   return (
     <div className="app-shell">
       <div className="hud">
         <h1>Dynamic Topology - Deploy Check 2026-02-20</h1>
         <p>Status: {connected ? 'connected' : 'disconnected'}</p>
+        <div className="status-badges">
+          <span className={`badge ${connected ? 'ok' : 'error'}`}>{connected ? '连接正常' : '连接中断'}</span>
+          <span className={`badge ${runtimeHealth.stalenessMs >= STALE_ERROR_MS ? 'error' : runtimeHealth.stalenessMs >= STALE_WARN_MS ? 'warn' : 'ok'}`}>
+            延迟 {runtimeHealth.stalenessMs}ms
+          </span>
+          <span className={`badge ${runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN ? 'warn' : 'ok'}`}>
+            帧率 {runtimeHealth.ingestFps.toFixed(2)}fps
+          </span>
+        </div>
         <p>WS: {WS_URL}</p>
         <p>t: {frame ? frame.sim_time_s.toFixed(1) : '-'} s</p>
         <p>nodes: {frame ? frame.nodes.length : 0}</p>
@@ -546,6 +599,17 @@ export function App() {
         <p>mobile connected: {frame ? `${frame.metrics.mobile_connected_count ?? 0}/${(frame.nodes.filter((n) => n.type !== 'leo').length || 1)}` : '-'}</p>
         <p>mobile ratio: {frame ? `${((frame.metrics.mobile_connected_ratio ?? 0) * 100).toFixed(1)}%` : '-'}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
+        <div className="alert-box">
+          {alerts.length === 0 ? (
+            <div className="alert-row ok">当前无告警</div>
+          ) : (
+            alerts.map((a, idx) => (
+              <div key={`${a.level}-${idx}`} className={`alert-row ${a.level}`}>
+                {a.text}
+              </div>
+            ))
+          )}
+        </div>
         <div className="legend">
           <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
           <div className="legend-item"><span className="swatch sat-sat" />satellite-satellite link</div>
