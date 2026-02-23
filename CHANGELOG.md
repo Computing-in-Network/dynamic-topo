@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.3.0 - 2026-02-23
+
+### Frontend Usability
+- 修复故障面板在故障条目较多时无法滚动到底部的问题。
+- 新增故障列表独立滚动区域，确保“解除全部故障”按钮始终可达、可操作。
+
+### Topology Metrics
+- 集成 QoE-Imbalance 指标 `I` 到后端实时 `metrics` 输出。
+- 前端 HUD 增加 `I(QoE-Imbalance)` 展示，支持在线观测网络健康不平衡度。
+
+### Quality
+- 新增指标 `I` 相关单元测试（完整图/路径图/全断开）与范围断言。
+
 ## v0.2.2 - 2026-02-23
 
 ### Topology Policy

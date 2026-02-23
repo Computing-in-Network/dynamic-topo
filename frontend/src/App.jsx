@@ -945,25 +945,27 @@ export function App() {
             <span>故障面板</span>
             <button type="button" onClick={() => sendControl('list_faults')}>刷新</button>
           </div>
-          {faults.length === 0 ? (
-            <div className="fault-empty">当前无故障注入</div>
-          ) : (
-            faults.map((fault) => (
-              <div key={fault.fault_id} className="fault-row">
-                <div className="fault-row-title">{fault.fault_type}</div>
-                <div className="fault-row-target">
-                  {fault.fault_type === 'DAMAGED'
-                    ? `node=${fault.target?.node_id || '-'}`
-                    : `a=${fault.target?.a || '-'}, b=${fault.target?.b || '-'}`}
+          <div className="fault-list">
+            {faults.length === 0 ? (
+              <div className="fault-empty">当前无故障注入</div>
+            ) : (
+              faults.map((fault) => (
+                <div key={fault.fault_id} className="fault-row">
+                  <div className="fault-row-title">{fault.fault_type}</div>
+                  <div className="fault-row-target">
+                    {fault.fault_type === 'DAMAGED'
+                      ? `node=${fault.target?.node_id || '-'}`
+                      : `a=${fault.target?.a || '-'}, b=${fault.target?.b || '-'}`}
+                  </div>
+                  <div className="fault-row-actions">
+                    <button type="button" onClick={() => focusFaultTarget(fault)}>定位</button>
+                    <button type="button" onClick={() => sendControl('clear_fault', { fault_id: fault.fault_id })}>解除</button>
+                  </div>
                 </div>
-                <div className="fault-row-actions">
-                  <button type="button" onClick={() => focusFaultTarget(fault)}>定位</button>
-                  <button type="button" onClick={() => sendControl('clear_fault', { fault_id: fault.fault_id })}>解除</button>
-                </div>
-              </div>
-            ))
-          )}
-          <div className="fault-row-actions">
+              ))
+            )}
+          </div>
+          <div className="fault-row-actions fault-footer-actions">
             <button type="button" onClick={() => sendControl('clear_all_faults')}>解除全部故障</button>
           </div>
         </div>

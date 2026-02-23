@@ -89,7 +89,7 @@ git push origin <tag_name>
 
 - 变更日志：`CHANGELOG.md`
 - 发布说明：`docs/releases/v0.2.0.md`
-- 发布说明（最新）：`docs/releases/v0.2.2.md`
+- 发布说明（最新）：`docs/releases/v0.3.0.md`
 - 发布检查清单：`docs/release_checklist.md`
 - 故障注入验收手册：`docs/fault_injection_acceptance.md`
 
