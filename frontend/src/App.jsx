@@ -902,6 +902,7 @@ export function App() {
         <p>avg degree: {frame ? frame.metrics.avg_degree.toFixed(2) : '-'}</p>
         <p>mobile connected: {frame ? `${frame.metrics.mobile_connected_count ?? 0}/${(frame.nodes.filter((n) => n.type !== 'leo').length || 1)}` : '-'}</p>
         <p>mobile ratio: {frame ? `${((frame.metrics.mobile_connected_ratio ?? 0) * 100).toFixed(1)}%` : '-'}</p>
+        <p>I(QoE-Imbalance): {frame ? (frame.metrics.qoe_imbalance ?? 0).toFixed(4) : '-'}</p>
         <p>fault nodes: {frame ? frame.metrics.fault_node_count ?? 0 : 0}</p>
         <p>fault links: {frame ? frame.metrics.fault_link_count ?? 0 : 0}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
