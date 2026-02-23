@@ -7,6 +7,7 @@ import {
   HorizontalOrigin,
   LabelStyle,
   OpenStreetMapImageryProvider,
+  PolylineDashMaterialProperty,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
   TileMapServiceImageryProvider,
@@ -65,6 +66,7 @@ const defaultLayerPrefs = {
 const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
 const DAMAGED_NODE_COLOR = Color.fromCssColorString('#ff595e');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
+const FAULT_LINK_COLOR = Color.fromCssColorString('#ff3b30').withAlpha(0.95);
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
@@ -185,6 +187,10 @@ function isLinkVisible(linkKind, layerPrefs) {
   return layerPrefs.linkOther;
 }
 
+function edgeKey(a, b) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
@@ -220,6 +226,7 @@ export function App() {
   const trailPointsRef = useRef(new Map());
   const orbitEntitiesRef = useRef(new Map());
   const linkEntitiesRef = useRef(new Map());
+  const faultLinkEntitiesRef = useRef(new Map());
   const linkVisualStateRef = useRef(new Map());
   const pickHandlerRef = useRef(null);
   const nodeStateRef = useRef(new Map());
@@ -270,6 +277,56 @@ export function App() {
     }
     const request_id = `req-${Date.now()}`;
     ws.send(JSON.stringify({ action, request_id, ...extra }));
+  }
+
+  function focusFaultTarget(fault) {
+    const viewer = viewerRef.current;
+    if (!viewer) {
+      return;
+    }
+    if (fault.fault_type === 'DAMAGED') {
+      const nodeId = fault.target?.node_id;
+      if (!nodeId) {
+        return;
+      }
+      const node = nodeStateRef.current.get(nodeId);
+      if (!node) {
+        return;
+      }
+      setSelected({ kind: 'node', id: nodeId });
+      viewer.camera.flyTo({
+        destination: Cartesian3.fromDegrees(node.lon, node.lat, node.alt_m + 1_200_000),
+        duration: 0.8
+      });
+      return;
+    }
+    const a = fault.target?.a;
+    const b = fault.target?.b;
+    if (!a || !b) {
+      return;
+    }
+    const aNode = nodeStateRef.current.get(a);
+    const bNode = nodeStateRef.current.get(b);
+    if (!aNode || !bNode) {
+      return;
+    }
+    const linkIdAB = `${a}-${b}`;
+    const linkIdBA = `${b}-${a}`;
+    const linkIdFault = `fault-${edgeKey(a, b)}`;
+    const linkId = linkStateRef.current.has(linkIdAB)
+      ? linkIdAB
+      : (linkStateRef.current.has(linkIdBA) ? linkIdBA : linkIdFault);
+    if (linkStateRef.current.has(linkId)) {
+      setSelected({ kind: 'link', id: linkId });
+    }
+    viewer.camera.flyTo({
+      destination: Cartesian3.fromDegrees(
+        (aNode.lon + bNode.lon) / 2.0,
+        (aNode.lat + bNode.lat) / 2.0,
+        Math.max(aNode.alt_m, bNode.alt_m) + 1_200_000
+      ),
+      duration: 0.8
+    });
   }
 
   useEffect(() => {
@@ -378,6 +435,7 @@ export function App() {
       frameQueueRef.current = [];
       setQueueDepth(0);
       setControlStatus('');
+      ws.send(JSON.stringify({ action: 'list_faults', request_id: `req-${Date.now()}` }));
     };
     ws.onclose = () => {
       setConnected(false);
@@ -601,6 +659,11 @@ export function App() {
     const linkState = new Map();
     const degreeCount = new Map();
     const nodeMap = new Map(frame.nodes.map((n) => [n.id, n]));
+    const faultLinkKeys = new Set(
+      faults
+        .filter((f) => f.fault_type === 'INTERRUPTED' && f.target?.a && f.target?.b)
+        .map((f) => edgeKey(f.target.a, f.target.b))
+    );
     for (const edge of frame.links) {
       const a = nodeMap.get(edge.a);
       const b = nodeMap.get(edge.b);
@@ -610,6 +673,7 @@ export function App() {
       degreeCount.set(edge.a, (degreeCount.get(edge.a) || 0) + 1);
       degreeCount.set(edge.b, (degreeCount.get(edge.b) || 0) + 1);
       const linkId = `${edge.a}-${edge.b}`;
+      const linkFaulted = faultLinkKeys.has(edgeKey(edge.a, edge.b));
       activeLinks.add(linkId);
       const pa = nodePositionMap.get(a.id);
       const pb = nodePositionMap.get(b.id);
@@ -635,33 +699,50 @@ export function App() {
           polyline: {
             positions,
             width: style.width,
-            material: style.color
+            material: linkFaulted
+              ? new PolylineDashMaterialProperty({
+                  color: FAULT_LINK_COLOR,
+                  dashLength: 12
+                })
+              : style.color
           }
         });
         linkEntitiesRef.current.set(linkId, lineEntity);
         linkVisualStateRef.current.set(linkId, {
           width: style.width,
           selected: selectedLink,
-          kind: linkKind
+          kind: linkKind,
+          fault: linkFaulted
         });
       } else {
         lineEntity.polyline.positions = positions;
       }
       const visual = linkVisualStateRef.current.get(linkId);
-      const expectedWidth = selectedLink ? style.width + 1.6 : style.width;
+      const baseWidth = linkFaulted ? Math.max(style.width, 2.8) : style.width;
+      const expectedWidth = selectedLink ? baseWidth + 1.6 : baseWidth;
       const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
       if (widthChanged) {
         lineEntity.polyline.width = expectedWidth;
       }
-      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind;
+      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind || visual.fault !== linkFaulted;
       if (materialChanged) {
-        lineEntity.polyline.material = selectedLink ? SELECTED_LINK_COLOR : style.color;
+        if (selectedLink) {
+          lineEntity.polyline.material = SELECTED_LINK_COLOR;
+        } else if (linkFaulted) {
+          lineEntity.polyline.material = new PolylineDashMaterialProperty({
+            color: FAULT_LINK_COLOR,
+            dashLength: 12
+          });
+        } else {
+          lineEntity.polyline.material = style.color;
+        }
       }
       lineEntity.show = visible;
       linkVisualStateRef.current.set(linkId, {
         width: expectedWidth,
         selected: selectedLink,
-        kind: linkKind
+        kind: linkKind,
+        fault: linkFaulted
       });
     }
 
@@ -670,6 +751,75 @@ export function App() {
         entities.remove(ent);
         linkEntitiesRef.current.delete(id);
         linkVisualStateRef.current.delete(id);
+      }
+    }
+
+    const activeFaultLinks = new Set();
+    for (const fault of faults) {
+      if (fault.fault_type !== 'INTERRUPTED') {
+        continue;
+      }
+      const aId = fault.target?.a;
+      const bId = fault.target?.b;
+      if (!aId || !bId) {
+        continue;
+      }
+      const a = nodeMap.get(aId);
+      const b = nodeMap.get(bId);
+      if (!a || !b) {
+        continue;
+      }
+      const normalAB = `${aId}-${bId}`;
+      const normalBA = `${bId}-${aId}`;
+      if (activeLinks.has(normalAB) || activeLinks.has(normalBA)) {
+        continue;
+      }
+      const pa = nodePositionMap.get(aId);
+      const pb = nodePositionMap.get(bId);
+      if (!pa || !pb) {
+        continue;
+      }
+      const faultId = `fault-${edgeKey(aId, bId)}`;
+      activeFaultLinks.add(faultId);
+      const selectedFault = selected?.kind === 'link' && selected.id === faultId;
+      const linkKind = resolveLinkKind(a, b);
+      const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
+      let faultEntity = faultLinkEntitiesRef.current.get(faultId);
+      if (!faultEntity) {
+        faultEntity = entities.add({
+          id: `link-${faultId}`,
+          polyline: {
+            positions: [pa, pb],
+            width: 2.8,
+            material: new PolylineDashMaterialProperty({
+              color: FAULT_LINK_COLOR,
+              dashLength: 12
+            })
+          }
+        });
+        faultLinkEntitiesRef.current.set(faultId, faultEntity);
+      } else {
+        faultEntity.polyline.positions = [pa, pb];
+      }
+      faultEntity.polyline.width = selectedFault ? 4.2 : 2.8;
+      faultEntity.polyline.material = selectedFault
+        ? SELECTED_LINK_COLOR
+        : new PolylineDashMaterialProperty({
+            color: FAULT_LINK_COLOR,
+            dashLength: 12
+          });
+      faultEntity.show = visible;
+      linkState.set(faultId, {
+        id: faultId,
+        kind: linkKind,
+        a,
+        b
+      });
+    }
+    for (const [id, ent] of faultLinkEntitiesRef.current) {
+      if (!activeFaultLinks.has(id)) {
+        entities.remove(ent);
+        faultLinkEntitiesRef.current.delete(id);
       }
     }
 
@@ -697,7 +847,7 @@ export function App() {
         setSelected(null);
       }
     }
-  }, [frame, layerPrefs, selected]);
+  }, [frame, layerPrefs, selected, faults]);
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
@@ -789,6 +939,33 @@ export function App() {
             <label><input type="checkbox" checked={layerPrefs.showLabels} onChange={() => toggleLayer('showLabels')} /> 标签</label>
           </div>
         </div>
+        <div className="fault-panel">
+          <div className="layer-header">
+            <span>故障面板</span>
+            <button type="button" onClick={() => sendControl('list_faults')}>刷新</button>
+          </div>
+          {faults.length === 0 ? (
+            <div className="fault-empty">当前无故障注入</div>
+          ) : (
+            faults.map((fault) => (
+              <div key={fault.fault_id} className="fault-row">
+                <div className="fault-row-title">{fault.fault_type}</div>
+                <div className="fault-row-target">
+                  {fault.fault_type === 'DAMAGED'
+                    ? `node=${fault.target?.node_id || '-'}`
+                    : `a=${fault.target?.a || '-'}, b=${fault.target?.b || '-'}`}
+                </div>
+                <div className="fault-row-actions">
+                  <button type="button" onClick={() => focusFaultTarget(fault)}>定位</button>
+                  <button type="button" onClick={() => sendControl('clear_fault', { fault_id: fault.fault_id })}>解除</button>
+                </div>
+              </div>
+            ))
+          )}
+          <div className="fault-row-actions">
+            <button type="button" onClick={() => sendControl('clear_all_faults')}>解除全部故障</button>
+          </div>
+        </div>
       </div>
       {hoverInfo ? (
         <div
@@ -851,30 +1028,6 @@ export function App() {
             </div>
           </div>
         ) : null}
-        <div className="detail-block">
-          <div className="detail-title">故障列表</div>
-          {faults.length === 0 ? (
-            <div>当前无人工故障</div>
-          ) : (
-            faults.map((fault) => (
-              <div key={fault.fault_id} className="fault-item">
-                <div>{fault.fault_type} - {fault.fault_id}</div>
-                <div className="fault-target">
-                  {fault.fault_type === 'DAMAGED'
-                    ? `node=${fault.target?.node_id || '-'}`
-                    : `a=${fault.target?.a || '-'}, b=${fault.target?.b || '-'}`}
-                </div>
-                <button type="button" onClick={() => sendControl('clear_fault', { fault_id: fault.fault_id })}>
-                  解除该故障
-                </button>
-              </div>
-            ))
-          )}
-          <div className="detail-actions">
-            <button type="button" onClick={() => sendControl('list_faults')}>刷新故障列表</button>
-            <button type="button" onClick={() => sendControl('clear_all_faults')}>解除全部故障</button>
-          </div>
-        </div>
       </aside>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
