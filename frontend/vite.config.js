@@ -20,5 +20,27 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: 5173
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes('node_modules')) {
+            return undefined;
+          }
+          const seg = id.split('node_modules/')[1];
+          if (!seg) {
+            return 'vendor';
+          }
+          const pkg = seg.startsWith('@')
+            ? seg.split('/').slice(0, 2).join('_')
+            : seg.split('/')[0];
+          if (pkg === 'cesium' || pkg.startsWith('@cesium')) {
+            return 'vendor-cesium';
+          }
+          return 'vendor';
+        }
+      }
+    }
   }
 });
