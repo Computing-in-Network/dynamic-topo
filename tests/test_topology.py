@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -13,6 +14,7 @@ from dynamic_topo.engine import (
     estimated_working_set_mb,
 )
 from dynamic_topo.storage import InMemoryRedis
+from scripts.generate_topology_snapshot import build_snapshot
 
 
 def build_engine() -> TopologyEngine:
@@ -320,3 +322,14 @@ def test_min_link_down_hold_blocks_early_promote() -> None:
     assert not down[0, 1]
     assert not up1[0, 1]
     assert up2[0, 1]
+
+
+def test_topology_snapshot_matches_baseline() -> None:
+    baseline_path = Path("tests/fixtures/topology_snapshot.json")
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    current = build_snapshot(
+        steps=int(baseline["meta"]["steps"]),
+        dt=float(baseline["meta"]["dt"]),
+        seed=int(baseline["meta"]["seed"]),
+    )
+    assert current == baseline
