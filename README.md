@@ -63,6 +63,12 @@ VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 uv run python -m pytest -q
 ```
 
+故障注入相关测试（后端模型 + WS 控制通道）：
+
+```bash
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest tests/test_topology.py tests/test_stream_server.py -q
+```
+
 更新拓扑回归快照基线：
 
 ```bash
@@ -83,8 +89,19 @@ git push origin <tag_name>
 
 - 变更日志：`CHANGELOG.md`
 - 发布说明：`docs/releases/v0.2.0.md`
-- 发布说明（最新）：`docs/releases/v0.2.2.md`
+- 发布说明（最新）：`docs/releases/v0.3.0.md`
 - 发布检查清单：`docs/release_checklist.md`
+- 故障注入验收手册：`docs/fault_injection_acceptance.md`
+
+## 故障注入（当前能力）
+
+- 节点故障：`DAMAGED`（节点相关链路全部失效）
+- 链路故障：`INTERRUPTED`（指定链路强制断开）
+- 前端操作：
+  - 选中节点 -> `注入节点故障`
+  - 选中链路 -> `注入链路故障`
+  - 右侧故障列表 -> `解除该故障` / `解除全部故障`
+- 后端原则：人工故障优先级高于自动拓扑计算
 
 ## 使用 Gitea Actions + Docker 部署（一步步）
 

@@ -24,6 +24,131 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _control_error(action: str | None, request_id: str | None, message: str) -> dict:
+    return {
+        "type": "control_ack",
+        "ok": False,
+        "action": action,
+        "request_id": request_id,
+        "error": message,
+    }
+
+
+def _find_existing_fault(engine: TopologyEngine, fault_type: str, target: dict) -> dict | None:
+    for fault in engine.list_faults():
+        if fault.get("fault_type") != fault_type:
+            continue
+        if fault.get("target") == target:
+            return fault
+    return None
+
+
+def _handle_control_message(engine: TopologyEngine, payload: dict) -> dict:
+    action = payload.get("action")
+    request_id = payload.get("request_id")
+    if not isinstance(action, str) or not action:
+        return _control_error(None, request_id, "missing action")
+
+    try:
+        if action == "inject_node_fault":
+            node_id = payload.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                return _control_error(action, request_id, "node_id is required")
+            target = {"node_id": node_id}
+            existing = _find_existing_fault(engine, "DAMAGED", target)
+            if existing is not None:
+                return {
+                    "type": "control_ack",
+                    "ok": True,
+                    "action": action,
+                    "request_id": request_id,
+                    "deduplicated": True,
+                    "fault": existing,
+                    "faults": engine.list_faults(),
+                }
+            fault_id = engine.inject_node_fault(node_id)
+            fault = next((f for f in engine.list_faults() if f["fault_id"] == fault_id), None)
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "deduplicated": False,
+                "fault": fault,
+                "faults": engine.list_faults(),
+            }
+
+        if action == "inject_link_fault":
+            a = payload.get("a")
+            b = payload.get("b")
+            if not isinstance(a, str) or not isinstance(b, str) or not a or not b:
+                return _control_error(action, request_id, "a and b are required")
+            if a == b:
+                return _control_error(action, request_id, "a and b must be different")
+            aa, bb = (a, b) if a < b else (b, a)
+            target = {"a": aa, "b": bb}
+            existing = _find_existing_fault(engine, "INTERRUPTED", target)
+            if existing is not None:
+                return {
+                    "type": "control_ack",
+                    "ok": True,
+                    "action": action,
+                    "request_id": request_id,
+                    "deduplicated": True,
+                    "fault": existing,
+                    "faults": engine.list_faults(),
+                }
+            fault_id = engine.inject_link_fault(a, b)
+            fault = next((f for f in engine.list_faults() if f["fault_id"] == fault_id), None)
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "deduplicated": False,
+                "fault": fault,
+                "faults": engine.list_faults(),
+            }
+
+        if action == "clear_fault":
+            fault_id = payload.get("fault_id")
+            if not isinstance(fault_id, str) or not fault_id:
+                return _control_error(action, request_id, "fault_id is required")
+            ok = engine.clear_fault(fault_id)
+            if not ok:
+                return _control_error(action, request_id, f"fault not found: {fault_id}")
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "faults": engine.list_faults(),
+            }
+
+        if action == "clear_all_faults":
+            engine.clear_all_faults()
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "faults": engine.list_faults(),
+            }
+
+        if action == "list_faults":
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "faults": engine.list_faults(),
+            }
+    except ValueError as exc:
+        return _control_error(action, request_id, str(exc))
+
+    return _control_error(action, request_id, f"unknown action: {action}")
+
+
 async def run_server(host: str, port: int, config: SimulationConfig, seed: int) -> None:
     try:
         from websockets.asyncio.server import serve
@@ -37,9 +162,17 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
     async def handler(websocket):
         clients.add(websocket)
         try:
-            async for _ in websocket:
-                # Control channel reserved for future use.
-                pass
+            async for message in websocket:
+                try:
+                    payload = json.loads(message)
+                except json.JSONDecodeError:
+                    response = _control_error(None, None, "invalid JSON payload")
+                else:
+                    if not isinstance(payload, dict):
+                        response = _control_error(None, None, "payload must be a JSON object")
+                    else:
+                        response = _handle_control_message(engine, payload)
+                await websocket.send(json.dumps(response, separators=(",", ":")))
         finally:
             clients.discard(websocket)
 
