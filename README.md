@@ -79,6 +79,12 @@ uv run python scripts/generate_topology_snapshot.py --output tests/fixtures/topo
 git push origin <tag_name>
 ```
 
+## 发布文档
+
+- 变更日志：`CHANGELOG.md`
+- 发布说明：`docs/releases/v0.2.0.md`
+- 发布检查清单：`docs/release_checklist.md`
+
 ## 使用 Gitea Actions + Docker 部署（一步步）
 
 1. 准备部署机（只做一次）
@@ -109,5 +115,3 @@ git push origin <tag_name>
    - 前端：`http://<DEPLOY_HOST>:8080`
    - 后端 WS：`ws://<DEPLOY_HOST>:8765`
    - 在部署机查看容器：`docker ps`
-
-这个文件需要修改的
