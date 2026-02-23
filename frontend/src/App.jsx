@@ -20,6 +20,7 @@ const defaultWsUrl = (() => {
   return `${scheme}://${window.location.hostname}:8765`;
 })();
 const WS_URL = import.meta.env.VITE_TOPO_WS_URL || defaultWsUrl;
+const LAYER_PREFS_KEY = 'topo_layer_prefs_v1';
 const TRAIL_LEN_BY_TYPE = {
   leo: 180,
   aircraft: 260,
@@ -49,6 +50,17 @@ const linkStyle = {
     color: Color.fromCssColorString('#8da9c4').withAlpha(0.18),
     width: 1.0
   }
+};
+const defaultLayerPrefs = {
+  nodeLeo: true,
+  nodeAircraft: true,
+  nodeShip: true,
+  linkSatSat: true,
+  linkSatMobile: true,
+  linkOther: true,
+  showTrails: true,
+  showLabels: true,
+  showOrbits: true
 };
 
 function svgDataUri(svg) {
@@ -128,22 +140,57 @@ function buildSatelliteOrbitPolyline(node) {
   return points;
 }
 
-function resolveLinkStyle(a, b) {
+function resolveLinkKind(a, b) {
   const aSat = a.type === 'leo';
   const bSat = b.type === 'leo';
   if (aSat && bSat) {
-    return linkStyle.sat_sat;
+    return 'sat_sat';
   }
   if ((aSat && !bSat) || (!aSat && bSat)) {
-    return linkStyle.sat_mobile;
+    return 'sat_mobile';
   }
-  return linkStyle.other;
+  return 'other';
+}
+
+function resolveLinkStyle(a, b) {
+  return linkStyle[resolveLinkKind(a, b)];
+}
+
+function isNodeVisible(node, layerPrefs) {
+  if (node.type === 'leo') {
+    return layerPrefs.nodeLeo;
+  }
+  if (node.type === 'aircraft') {
+    return layerPrefs.nodeAircraft;
+  }
+  return layerPrefs.nodeShip;
+}
+
+function isLinkVisible(linkKind, layerPrefs) {
+  if (linkKind === 'sat_sat') {
+    return layerPrefs.linkSatSat;
+  }
+  if (linkKind === 'sat_mobile') {
+    return layerPrefs.linkSatMobile;
+  }
+  return layerPrefs.linkOther;
 }
 
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
   const [hoverInfo, setHoverInfo] = useState(null);
+  const [layerPrefs, setLayerPrefs] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
+      if (!raw) {
+        return defaultLayerPrefs;
+      }
+      return { ...defaultLayerPrefs, ...JSON.parse(raw) };
+    } catch {
+      return defaultLayerPrefs;
+    }
+  });
 
   const containerRef = useRef(null);
   const viewerRef = useRef(null);
@@ -154,6 +201,19 @@ export function App() {
   const linkEntitiesRef = useRef(new Map());
   const pickHandlerRef = useRef(null);
   const nodeStateRef = useRef(new Map());
+  const nodeVisibilityRef = useRef(new Map());
+
+  useEffect(() => {
+    window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
+  }, [layerPrefs]);
+
+  function toggleLayer(key) {
+    setLayerPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  function resetLayerPrefs() {
+    setLayerPrefs(defaultLayerPrefs);
+  }
 
   useEffect(() => {
     if (!containerRef.current || viewerRef.current) {
@@ -201,6 +261,10 @@ export function App() {
         return;
       }
       const nodeId = picked.id.id.slice(5);
+      if (!nodeVisibilityRef.current.get(nodeId)) {
+        setHoverInfo(null);
+        return;
+      }
       const node = nodeStateRef.current.get(nodeId);
       if (!node) {
         setHoverInfo(null);
@@ -249,6 +313,8 @@ export function App() {
       activeNodeIds.add(node.id);
       const position = toCartesian(node);
       const color = typeColor[node.type] || Color.WHITE;
+      const nodeVisible = isNodeVisible(node, layerPrefs);
+      nodeVisibilityRef.current.set(node.id, nodeVisible);
 
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
@@ -283,6 +349,10 @@ export function App() {
       } else {
         nodeEntity.position = position;
       }
+      nodeEntity.show = nodeVisible;
+      if (nodeEntity.label) {
+        nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
+      }
 
       const trail = trailPointsRef.current.get(node.id) || [];
       trail.push(position);
@@ -306,6 +376,7 @@ export function App() {
       } else {
         trailEntity.polyline.positions = trail;
       }
+      trailEntity.show = nodeVisible && layerPrefs.showTrails;
 
       if (node.type === 'leo') {
         const orbitPositions = buildSatelliteOrbitPolyline(node);
@@ -324,6 +395,7 @@ export function App() {
           } else {
             orbitEntity.polyline.positions = orbitPositions;
           }
+          orbitEntity.show = nodeVisible && layerPrefs.showOrbits;
         }
       }
     }
@@ -365,6 +437,8 @@ export function App() {
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
+      const linkKind = resolveLinkKind(a, b);
+      const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
       if (!lineEntity) {
         lineEntity = entities.add({
           id: `link-${linkId}`,
@@ -380,6 +454,7 @@ export function App() {
         lineEntity.polyline.width = style.width;
         lineEntity.polyline.material = style.color;
       }
+      lineEntity.show = visible;
     }
 
     for (const [id, ent] of linkEntitiesRef.current) {
@@ -399,7 +474,7 @@ export function App() {
       });
     }
     nodeStateRef.current = nodeState;
-  }, [frame]);
+  }, [frame, layerPrefs]);
 
   return (
     <div className="app-shell">
@@ -418,6 +493,23 @@ export function App() {
           <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
           <div className="legend-item"><span className="swatch sat-sat" />satellite-satellite link</div>
           <div className="legend-item"><span className="swatch sat-mobile" />satellite-air/ship link</div>
+        </div>
+        <div className="layer-panel">
+          <div className="layer-header">
+            <span>图层控制</span>
+            <button type="button" onClick={resetLayerPrefs}>重置</button>
+          </div>
+          <div className="layer-grid">
+            <label><input type="checkbox" checked={layerPrefs.nodeLeo} onChange={() => toggleLayer('nodeLeo')} /> 卫星</label>
+            <label><input type="checkbox" checked={layerPrefs.nodeAircraft} onChange={() => toggleLayer('nodeAircraft')} /> 飞机</label>
+            <label><input type="checkbox" checked={layerPrefs.nodeShip} onChange={() => toggleLayer('nodeShip')} /> 舰船</label>
+            <label><input type="checkbox" checked={layerPrefs.linkSatSat} onChange={() => toggleLayer('linkSatSat')} /> 星间链路</label>
+            <label><input type="checkbox" checked={layerPrefs.linkSatMobile} onChange={() => toggleLayer('linkSatMobile')} /> 星地/空链路</label>
+            <label><input type="checkbox" checked={layerPrefs.linkOther} onChange={() => toggleLayer('linkOther')} /> 非卫星链路</label>
+            <label><input type="checkbox" checked={layerPrefs.showTrails} onChange={() => toggleLayer('showTrails')} /> 轨迹</label>
+            <label><input type="checkbox" checked={layerPrefs.showOrbits} onChange={() => toggleLayer('showOrbits')} /> 轨道环</label>
+            <label><input type="checkbox" checked={layerPrefs.showLabels} onChange={() => toggleLayer('showLabels')} /> 标签</label>
+          </div>
         </div>
       </div>
       {hoverInfo ? (
