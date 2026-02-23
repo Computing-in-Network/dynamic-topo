@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.2.1 - 2026-02-23
+
+### Frontend Build
+- 优化 Vite 分包策略，将主入口与供应商依赖分离（`index` + `vendor` + `vendor-cesium`）。
+- 显著降低主入口包体积，保留现有运行逻辑与接口兼容性。
+
 ## v0.2.0 - 2026-02-23
 
 ### Topology Backend
