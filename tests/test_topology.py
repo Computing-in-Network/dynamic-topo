@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import numpy as np
+import pytest
 
 from dynamic_topo.engine import (
     EARTH_RADIUS_M,
@@ -201,6 +203,7 @@ def test_build_frame_contains_nodes_links_and_metrics() -> None:
     assert "edge_count" in frame.metrics
     assert "avg_degree" in frame.metrics
     assert "max_degree" in frame.metrics
+    assert "link_flip_count_tick" in frame.metrics
     assert "mobile_connected_count" in frame.metrics
     assert "mobile_connected_ratio" in frame.metrics
     assert 0.0 <= frame.metrics["mobile_connected_ratio"] <= 1.0
@@ -218,3 +221,102 @@ def test_ships_remain_on_ocean_mask_for_multiple_steps() -> None:
         frame = engine.build_frame(result)
         for node in frame.nodes[250:300]:
             assert not engine._is_land(node["lat"], node["lon"])
+
+
+def test_link_policy_file_override_is_applied(tmp_path) -> None:
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "dmax_air_ship_m": 123456.0,
+                "max_neighbors_air": 2,
+                "sat_isl_ports": 3,
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = SimulationConfig(link_policy_path=str(policy_path))
+    engine = TopologyEngine(cfg, seed=7, redis_client=InMemoryRedis())
+
+    assert engine._link_policy.dmax_air_ship_m == 123456.0
+    assert engine._link_policy.max_neighbors_air == 2
+    assert engine._link_policy.sat_isl_ports == 3
+
+
+def test_link_policy_file_rejects_unknown_keys(tmp_path) -> None:
+    policy_path = tmp_path / "bad_policy.json"
+    policy_path.write_text(json.dumps({"not_exist_key": 1}), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unknown link policy keys"):
+        _ = TopologyEngine(
+            SimulationConfig(link_policy_path=str(policy_path)),
+            seed=7,
+            redis_client=InMemoryRedis(),
+        )
+
+
+def test_link_policy_hot_reload_updates_runtime(tmp_path) -> None:
+    policy_path = tmp_path / "policy_hot.json"
+    policy_path.write_text(json.dumps({"sat_isl_ports": 2}), encoding="utf-8")
+    cfg = SimulationConfig(link_policy_path=str(policy_path), link_policy_hot_reload=True)
+    engine = TopologyEngine(cfg, seed=7, redis_client=InMemoryRedis())
+
+    assert engine._link_policy.sat_isl_ports == 2
+    policy_path.write_text(json.dumps({"sat_isl_ports": 5}), encoding="utf-8")
+
+    # Trigger a step so the engine checks the file mtime and reloads policy.
+    _ = engine.step(0.0, persist=False)
+    assert engine._link_policy.sat_isl_ports == 5
+
+
+def test_min_link_up_hold_blocks_early_demote() -> None:
+    cfg = SimulationConfig(
+        total_nodes=2,
+        leo_polar_count=1,
+        leo_inclined_count=0,
+        aircraft_count=1,
+        ship_count=0,
+        up_hold_s=1.0,
+        down_hold_s=1.0,
+        min_link_up_s=3.0,
+        timestep_s=1.0,
+    )
+    engine = TopologyEngine(cfg, seed=1, redis_client=InMemoryRedis())
+    candidate_up = np.array([[False, True], [True, False]], dtype=bool)
+    candidate_down = np.array([[False, False], [False, False]], dtype=bool)
+
+    up = engine._stabilize_links(candidate_up)
+    down1 = engine._stabilize_links(candidate_down)
+    down2 = engine._stabilize_links(candidate_down)
+    down3 = engine._stabilize_links(candidate_down)
+
+    assert up[0, 1]
+    assert down1[0, 1]
+    assert down2[0, 1]
+    assert not down3[0, 1]
+
+
+def test_min_link_down_hold_blocks_early_promote() -> None:
+    cfg = SimulationConfig(
+        total_nodes=2,
+        leo_polar_count=1,
+        leo_inclined_count=0,
+        aircraft_count=1,
+        ship_count=0,
+        up_hold_s=1.0,
+        down_hold_s=1.0,
+        min_link_down_s=2.0,
+        timestep_s=1.0,
+    )
+    engine = TopologyEngine(cfg, seed=1, redis_client=InMemoryRedis())
+    candidate_up = np.array([[False, True], [True, False]], dtype=bool)
+    candidate_down = np.array([[False, False], [False, False]], dtype=bool)
+
+    _ = engine._stabilize_links(candidate_up)
+    down = engine._stabilize_links(candidate_down)
+    up1 = engine._stabilize_links(candidate_up)
+    up2 = engine._stabilize_links(candidate_up)
+
+    assert not down[0, 1]
+    assert not up1[0, 1]
+    assert up2[0, 1]

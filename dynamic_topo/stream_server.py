@@ -15,6 +15,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     parser.add_argument("--dt", type=float, default=1.0, help="Simulation tick seconds")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic RNG seed")
+    parser.add_argument("--link-policy", default=None, help="Path to link policy JSON file")
+    parser.add_argument(
+        "--hot-reload-link-policy",
+        action="store_true",
+        help="Reload link policy file when it changes",
+    )
     return parser.parse_args()
 
 
@@ -108,7 +114,11 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
 
 def main() -> None:
     args = parse_args()
-    config = SimulationConfig(timestep_s=args.dt)
+    config = SimulationConfig(
+        timestep_s=args.dt,
+        link_policy_path=args.link_policy,
+        link_policy_hot_reload=args.hot_reload_link_policy,
+    )
     asyncio.run(run_server(args.host, args.port, config=config, seed=args.seed))
 
 
