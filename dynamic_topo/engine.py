@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from time import perf_counter
@@ -11,6 +12,7 @@ from sgp4.api import WGS72, Satrec
 from skyfield.api import EarthSatellite, load
 from skyfield.framelib import itrs
 
+from .link_policy import LinkPolicy, load_link_policy_file
 from .storage import create_redis_client
 
 EARTH_RADIUS_M = 6_371_000.0
@@ -63,6 +65,8 @@ class SimulationConfig:
 
     # Optional movement constraints.
     enforce_ship_ocean_mask: bool = True
+    link_policy_path: str | None = None
+    link_policy_hot_reload: bool = False
 
 
 @dataclass(frozen=True)
@@ -92,11 +96,38 @@ class TopologyEngine:
         self._redis = redis_client if redis_client is not None else create_redis_client(config.redis_url)
         self._lla_to_ecef = Transformer.from_crs("EPSG:4979", "EPSG:4978", always_xy=True)
         self._ecef_to_lla = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
+        self._default_link_policy = LinkPolicy.from_simulation_config(config)
+        self._link_policy = self._default_link_policy
+        self._link_policy_path = config.link_policy_path
+        self._link_policy_mtime_ns: int | None = None
+        self._load_link_policy_if_configured()
 
         self._init_satellite_state()
         self._init_mobile_state()
         self._init_node_meta()
         self._init_link_state()
+
+    def _load_link_policy_if_configured(self) -> None:
+        if not self._link_policy_path:
+            return
+        self._link_policy = load_link_policy_file(self._link_policy_path, base=self._default_link_policy)
+        self._link_policy_mtime_ns = os.stat(self._link_policy_path).st_mtime_ns
+
+    def _reload_link_policy_if_needed(self) -> None:
+        if not self.config.link_policy_hot_reload or not self._link_policy_path:
+            return
+        current_mtime_ns = os.stat(self._link_policy_path).st_mtime_ns
+        if self._link_policy_mtime_ns is not None and current_mtime_ns == self._link_policy_mtime_ns:
+            return
+
+        new_policy = load_link_policy_file(self._link_policy_path, base=self._default_link_policy)
+        self._link_policy_mtime_ns = current_mtime_ns
+        if new_policy == self._link_policy:
+            return
+
+        self._link_policy = new_policy
+        self._apply_link_policy(reset_hysteresis=True)
+        print(f"reloaded link policy from {self._link_policy_path}")
 
     def _init_satellite_state(self) -> None:
         cfg = self.config
@@ -279,30 +310,37 @@ class TopologyEngine:
         )
         self._is_sat = self._type_codes == NODE_TYPE_LEO
 
-        self._degree_caps = np.where(
-            self._type_codes == NODE_TYPE_LEO,
-            cfg.max_neighbors_leo,
-            np.where(self._type_codes == NODE_TYPE_AIR, cfg.max_neighbors_air, cfg.max_neighbors_ship),
-        )
-
-        dmax = np.array(
-            [
-                [cfg.dmax_leo_leo_m, cfg.dmax_leo_air_m, cfg.dmax_leo_ship_m],
-                [cfg.dmax_leo_air_m, cfg.dmax_air_air_m, cfg.dmax_air_ship_m],
-                [cfg.dmax_leo_ship_m, cfg.dmax_air_ship_m, cfg.dmax_ship_ship_m],
-            ],
-            dtype=np.float64,
-        )
-        self._dmax_matrix = dmax[self._type_codes[:, None], self._type_codes[None, :]]
-        self._beam_cos_threshold = float(np.cos(np.deg2rad(cfg.sat_beam_half_angle_deg)))
-
     def _init_link_state(self) -> None:
         n = self.config.total_nodes
         self._adj_prev = np.zeros((n, n), dtype=bool)
         self._up_count = np.zeros((n, n), dtype=np.uint8)
         self._down_count = np.zeros((n, n), dtype=np.uint8)
-        self._up_hold_ticks = max(1, int(np.ceil(self.config.up_hold_s / self.config.timestep_s)))
-        self._down_hold_ticks = max(1, int(np.ceil(self.config.down_hold_s / self.config.timestep_s)))
+        self._apply_link_policy(reset_hysteresis=True)
+
+    def _apply_link_policy(self, reset_hysteresis: bool) -> None:
+        p = self._link_policy
+        self._degree_caps = np.where(
+            self._type_codes == NODE_TYPE_LEO,
+            p.max_neighbors_leo,
+            np.where(self._type_codes == NODE_TYPE_AIR, p.max_neighbors_air, p.max_neighbors_ship),
+        )
+
+        dmax = np.array(
+            [
+                [p.dmax_leo_leo_m, p.dmax_leo_air_m, p.dmax_leo_ship_m],
+                [p.dmax_leo_air_m, p.dmax_air_air_m, p.dmax_air_ship_m],
+                [p.dmax_leo_ship_m, p.dmax_air_ship_m, p.dmax_ship_ship_m],
+            ],
+            dtype=np.float64,
+        )
+        self._dmax_matrix = dmax[self._type_codes[:, None], self._type_codes[None, :]]
+        self._beam_cos_threshold = float(np.cos(np.deg2rad(p.sat_beam_half_angle_deg)))
+        self._up_hold_ticks = max(1, int(np.ceil(p.up_hold_s / self.config.timestep_s)))
+        self._down_hold_ticks = max(1, int(np.ceil(p.down_hold_s / self.config.timestep_s)))
+
+        if reset_hysteresis:
+            self._up_count.fill(0)
+            self._down_count.fill(0)
 
     @property
     def node_type_names(self) -> List[str]:
@@ -327,6 +365,7 @@ class TopologyEngine:
 
     def step(self, sim_time_s: float, persist: bool = True) -> TickResult:
         start = perf_counter()
+        self._reload_link_policy_if_needed()
 
         sat_positions, sat_velocity = self._satellite_ecef_with_velocity(sim_time_s)
         mobile_positions = self._mobile_ecef(sim_time_s)
@@ -581,7 +620,7 @@ class TopologyEngine:
 
         sat_adj = selected[: self._sat_count, : self._sat_count]
         sat_degree = np.zeros(self._sat_count, dtype=np.int16)
-        target_deg = int(max(0, self.config.sat_isl_ports))
+        target_deg = int(max(0, self._link_policy.sat_isl_ports))
 
         mandatory_edges: set[tuple[int, int]] = set()
         for i in range(self._sat_count):
@@ -716,9 +755,9 @@ class TopologyEngine:
 
             # ISL links are limited by hardware ports on each satellite.
             if i_is_sat and j_is_sat:
-                if sat_sat_degree[i] >= self.config.sat_isl_ports:
+                if sat_sat_degree[i] >= self._link_policy.sat_isl_ports:
                     continue
-                if sat_sat_degree[j] >= self.config.sat_isl_ports:
+                if sat_sat_degree[j] >= self._link_policy.sat_isl_ports:
                     continue
             # Mobile-mobile links keep degree caps to avoid dense local meshes.
             elif not i_is_sat and not j_is_sat:
