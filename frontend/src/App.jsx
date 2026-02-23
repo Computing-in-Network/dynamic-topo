@@ -67,6 +67,8 @@ const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
+const FRAME_QUEUE_MAX = 600;
+const SPEED_OPTIONS = [0.5, 1, 2];
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -190,6 +192,11 @@ export function App() {
     stalenessMs: 0,
     ingestFps: 0
   });
+  const [playback, setPlayback] = useState({
+    paused: false,
+    speed: 1
+  });
+  const [queueDepth, setQueueDepth] = useState(0);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -215,6 +222,7 @@ export function App() {
   const nodeVisibilityRef = useRef(new Map());
   const lastFrameAtRef = useRef(0);
   const frameTimestampsRef = useRef([]);
+  const frameQueueRef = useRef([]);
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -226,6 +234,25 @@ export function App() {
 
   function resetLayerPrefs() {
     setLayerPrefs(defaultLayerPrefs);
+  }
+
+  function shiftFrameFromQueue() {
+    if (frameQueueRef.current.length === 0) {
+      setQueueDepth(0);
+      return false;
+    }
+    const nextFrame = frameQueueRef.current.shift();
+    setQueueDepth(frameQueueRef.current.length);
+    if (nextFrame) {
+      setFrame(nextFrame);
+      return true;
+    }
+    return false;
+  }
+
+  function stepOnce() {
+    setPlayback((prev) => ({ ...prev, paused: true }));
+    shiftFrameFromQueue();
   }
 
   useEffect(() => {
@@ -330,6 +357,8 @@ export function App() {
       setConnected(true);
       lastFrameAtRef.current = Date.now();
       frameTimestampsRef.current = [];
+      frameQueueRef.current = [];
+      setQueueDepth(0);
     };
     ws.onclose = () => setConnected(false);
     ws.onerror = () => setConnected(false);
@@ -338,10 +367,25 @@ export function App() {
       lastFrameAtRef.current = now;
       frameTimestampsRef.current.push(now);
       const payload = JSON.parse(evt.data);
-      setFrame(payload);
+      frameQueueRef.current.push(payload);
+      if (frameQueueRef.current.length > FRAME_QUEUE_MAX) {
+        frameQueueRef.current.shift();
+      }
+      setQueueDepth(frameQueueRef.current.length);
     };
     return () => ws.close();
   }, []);
+
+  useEffect(() => {
+    if (playback.paused) {
+      return undefined;
+    }
+    const intervalMs = Math.max(80, Math.floor(1000 / playback.speed));
+    const timer = window.setInterval(() => {
+      shiftFrameFromQueue();
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [playback.paused, playback.speed]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -590,6 +634,23 @@ export function App() {
           <span className={`badge ${runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN ? 'warn' : 'ok'}`}>
             帧率 {runtimeHealth.ingestFps.toFixed(2)}fps
           </span>
+        </div>
+        <div className="time-controls">
+          <button type="button" onClick={() => setPlayback((p) => ({ ...p, paused: !p.paused }))}>
+            {playback.paused ? '继续' : '暂停'}
+          </button>
+          <button type="button" onClick={stepOnce}>单步</button>
+          {SPEED_OPTIONS.map((sp) => (
+            <button
+              type="button"
+              key={`speed-${sp}`}
+              className={playback.speed === sp ? 'active' : ''}
+              onClick={() => setPlayback((p) => ({ ...p, speed: sp }))}
+            >
+              {sp}x
+            </button>
+          ))}
+          <span className="queue-chip">缓冲 {queueDepth}</span>
         </div>
         <p>WS: {WS_URL}</p>
         <p>t: {frame ? frame.sim_time_s.toFixed(1) : '-'} s</p>
