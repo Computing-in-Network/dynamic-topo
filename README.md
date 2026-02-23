@@ -39,6 +39,7 @@ uv run python -m dynamic_topo.stream_server \
 
 - `--link-policy`：加载链路策略 JSON（覆盖默认阈值与容量参数）
 - `--hot-reload-link-policy`：运行中检测文件变更并自动重载
+- 可选稳定性参数：`min_link_up_s`、`min_link_down_s`（链路上线/下线后的最短保持时长）
 
 ## 前端运行
 

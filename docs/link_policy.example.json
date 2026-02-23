@@ -12,5 +12,7 @@
   "sat_beam_half_angle_deg": 66.5,
   "sat_beam_slots": 24,
   "up_hold_s": 2.0,
-  "down_hold_s": 2.0
+  "down_hold_s": 2.0,
+  "min_link_up_s": 0.0,
+  "min_link_down_s": 0.0
 }

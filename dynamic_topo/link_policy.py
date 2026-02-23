@@ -22,6 +22,8 @@ class LinkPolicy:
     sat_beam_slots: int
     up_hold_s: float
     down_hold_s: float
+    min_link_up_s: float
+    min_link_down_s: float
 
     @classmethod
     def from_simulation_config(cls, cfg: Any) -> "LinkPolicy":
@@ -40,6 +42,8 @@ class LinkPolicy:
             sat_beam_slots=int(cfg.sat_beam_slots),
             up_hold_s=float(cfg.up_hold_s),
             down_hold_s=float(cfg.down_hold_s),
+            min_link_up_s=float(cfg.min_link_up_s),
+            min_link_down_s=float(cfg.min_link_down_s),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -90,6 +94,8 @@ def _normalize_value(key: str, value: Any) -> Any:
         "sat_beam_half_angle_deg",
         "up_hold_s",
         "down_hold_s",
+        "min_link_up_s",
+        "min_link_down_s",
     }
 
     if key in int_fields:
@@ -125,3 +131,5 @@ def _validate_policy(policy: LinkPolicy) -> None:
         raise ValueError("sat_beam_half_angle_deg must be in (0, 90)")
     if policy.up_hold_s < 0.0 or policy.down_hold_s < 0.0:
         raise ValueError("up_hold_s and down_hold_s must be >= 0")
+    if policy.min_link_up_s < 0.0 or policy.min_link_down_s < 0.0:
+        raise ValueError("min_link_up_s and min_link_down_s must be >= 0")
