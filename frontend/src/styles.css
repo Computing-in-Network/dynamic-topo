@@ -200,6 +200,55 @@ body,
   color: #e9eff8;
 }
 
+.fault-panel {
+  margin-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  padding-top: 10px;
+}
+
+.fault-empty {
+  font-size: 12px;
+  color: #dce6f2;
+  padding: 6px 0;
+}
+
+.fault-row {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px;
+  margin: 6px 0;
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.fault-row-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffd7d9;
+}
+
+.fault-row-target {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #dce6f2;
+}
+
+.fault-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.fault-row-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ecf2fb;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
 .swatch {
   width: 16px;
   height: 4px;
