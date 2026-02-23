@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from time import perf_counter
@@ -92,6 +93,14 @@ class TopologyFrame:
     metrics: dict
 
 
+@dataclass(frozen=True)
+class FaultRecord:
+    fault_id: str
+    fault_type: str
+    target: dict
+    created_at: str
+
+
 class TopologyEngine:
     def __init__(self, config: SimulationConfig, seed: int = 42, redis_client=None):
         self.config = config
@@ -111,6 +120,7 @@ class TopologyEngine:
         self._init_mobile_state()
         self._init_node_meta()
         self._init_link_state()
+        self._init_fault_state()
 
     def _load_link_policy_if_configured(self) -> None:
         if not self._link_policy_path:
@@ -325,6 +335,11 @@ class TopologyEngine:
         self._apply_link_policy(reset_hysteresis=True)
         self._init_incremental_cache()
 
+    def _init_fault_state(self) -> None:
+        self._faults: dict[str, FaultRecord] = {}
+        self._fault_damaged_nodes: set[int] = set()
+        self._fault_interrupted_links: set[tuple[int, int]] = set()
+
     def _init_incremental_cache(self) -> None:
         self._cached_positions: np.ndarray | None = None
         self._cached_los: np.ndarray | None = None
@@ -380,6 +395,60 @@ class TopologyEngine:
     @property
     def node_ids(self) -> List[str]:
         return self.node_display_names
+
+    def inject_node_fault(self, node_id: str) -> str:
+        idx = self._node_index_from_id(node_id)
+        fault_id = self._new_fault_id()
+        record = FaultRecord(
+            fault_id=fault_id,
+            fault_type="DAMAGED",
+            target={"node_id": node_id},
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._faults[fault_id] = record
+        self._fault_damaged_nodes.add(idx)
+        return fault_id
+
+    def inject_link_fault(self, a_id: str, b_id: str) -> str:
+        ia = self._node_index_from_id(a_id)
+        ib = self._node_index_from_id(b_id)
+        if ia == ib:
+            raise ValueError("link fault requires two different nodes")
+        i, j = (ia, ib) if ia < ib else (ib, ia)
+        fault_id = self._new_fault_id()
+        record = FaultRecord(
+            fault_id=fault_id,
+            fault_type="INTERRUPTED",
+            target={"a": self.node_ids[i], "b": self.node_ids[j]},
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        self._faults[fault_id] = record
+        self._fault_interrupted_links.add((i, j))
+        return fault_id
+
+    def clear_fault(self, fault_id: str) -> bool:
+        record = self._faults.pop(fault_id, None)
+        if record is None:
+            return False
+
+        self._rebuild_fault_indexes()
+        return True
+
+    def clear_all_faults(self) -> None:
+        self._faults.clear()
+        self._fault_damaged_nodes.clear()
+        self._fault_interrupted_links.clear()
+
+    def list_faults(self) -> list[dict]:
+        return [
+            {
+                "fault_id": rec.fault_id,
+                "fault_type": rec.fault_type,
+                "target": dict(rec.target),
+                "created_at": rec.created_at,
+            }
+            for rec in self._faults.values()
+        ]
 
     def step(self, sim_time_s: float, persist: bool = True) -> TickResult:
         start = perf_counter()
@@ -459,6 +528,8 @@ class TopologyEngine:
             "avg_degree": float(np.mean(degree)),
             "max_degree": int(np.max(degree)),
             "link_flip_count_tick": int(self._last_flip_count),
+            "fault_node_count": int(len(self._fault_damaged_nodes)),
+            "fault_link_count": int(len(self._fault_interrupted_links)),
         }
         comp_count, largest_comp, largest_nodes = self._connected_components_summary(result.adjacency)
         metrics["component_count"] = int(comp_count)
@@ -611,7 +682,47 @@ class TopologyEngine:
         stable |= sat_mandatory
         np.fill_diagonal(stable, False)
         stable = np.logical_or(stable, stable.T)
+        stable = self._apply_fault_overrides(stable)
         return stable
+
+    def _apply_fault_overrides(self, adjacency: np.ndarray) -> np.ndarray:
+        if not self._fault_damaged_nodes and not self._fault_interrupted_links:
+            return adjacency
+
+        forced = adjacency.copy()
+        for idx in self._fault_damaged_nodes:
+            forced[idx, :] = False
+            forced[:, idx] = False
+        for i, j in self._fault_interrupted_links:
+            forced[i, j] = False
+            forced[j, i] = False
+        np.fill_diagonal(forced, False)
+        return np.logical_or(forced, forced.T)
+
+    def _node_index_from_id(self, node_id: str) -> int:
+        ids = self.node_ids
+        try:
+            return ids.index(node_id)
+        except ValueError as exc:
+            raise ValueError(f"unknown node id: {node_id}") from exc
+
+    def _new_fault_id(self) -> str:
+        return f"fault-{uuid.uuid4().hex[:10]}"
+
+    def _rebuild_fault_indexes(self) -> None:
+        damaged: set[int] = set()
+        interrupted: set[tuple[int, int]] = set()
+        for rec in self._faults.values():
+            if rec.fault_type == "DAMAGED":
+                damaged.add(self._node_index_from_id(str(rec.target["node_id"])))
+                continue
+            if rec.fault_type == "INTERRUPTED":
+                ia = self._node_index_from_id(str(rec.target["a"]))
+                ib = self._node_index_from_id(str(rec.target["b"]))
+                i, j = (ia, ib) if ia < ib else (ib, ia)
+                interrupted.add((i, j))
+        self._fault_damaged_nodes = damaged
+        self._fault_interrupted_links = interrupted
 
     def _geometry_matrices_incremental(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.config.incremental_geometry:
