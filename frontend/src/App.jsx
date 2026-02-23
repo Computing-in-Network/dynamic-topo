@@ -62,6 +62,8 @@ const defaultLayerPrefs = {
   showLabels: true,
   showOrbits: true
 };
+const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
+const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -180,6 +182,7 @@ export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
   const [hoverInfo, setHoverInfo] = useState(null);
+  const [selected, setSelected] = useState(null);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -201,6 +204,7 @@ export function App() {
   const linkEntitiesRef = useRef(new Map());
   const pickHandlerRef = useRef(null);
   const nodeStateRef = useRef(new Map());
+  const linkStateRef = useRef(new Map());
   const nodeVisibilityRef = useRef(new Map());
 
   useEffect(() => {
@@ -276,6 +280,29 @@ export function App() {
         node
       });
     }, ScreenSpaceEventType.MOUSE_MOVE);
+    pickHandler.setInputAction((movement) => {
+      const picked = viewer.scene.pick(movement.position);
+      if (!defined(picked) || !picked?.id?.id || typeof picked.id.id !== 'string') {
+        setSelected(null);
+        return;
+      }
+      const pickedId = picked.id.id;
+      if (pickedId.startsWith('node-')) {
+        const nodeId = pickedId.slice(5);
+        if (!nodeVisibilityRef.current.get(nodeId)) {
+          setSelected(null);
+          return;
+        }
+        setSelected({ kind: 'node', id: nodeId });
+        return;
+      }
+      if (pickedId.startsWith('link-')) {
+        const linkId = pickedId.slice(5);
+        setSelected({ kind: 'link', id: linkId });
+        return;
+      }
+      setSelected(null);
+    }, ScreenSpaceEventType.LEFT_CLICK);
 
     viewerRef.current = viewer;
     pickHandlerRef.current = pickHandler;
@@ -316,6 +343,7 @@ export function App() {
       const nodeVisible = isNodeVisible(node, layerPrefs);
       nodeVisibilityRef.current.set(node.id, nodeVisible);
 
+      const selectedNode = selected?.kind === 'node' && selected.id === node.id;
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
       const labelScale = node.type === 'leo' ? 0.45 : 0.35;
@@ -350,6 +378,10 @@ export function App() {
         nodeEntity.position = position;
       }
       nodeEntity.show = nodeVisible;
+      if (nodeEntity.billboard) {
+        nodeEntity.billboard.scale = selectedNode ? 1.35 : 1.0;
+        nodeEntity.billboard.color = selectedNode ? SELECTED_NODE_COLOR : color;
+      }
       if (nodeEntity.label) {
         nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
       }
@@ -421,6 +453,7 @@ export function App() {
     }
 
     const activeLinks = new Set();
+    const linkState = new Map();
     const degreeCount = new Map();
     const nodeMap = new Map(frame.nodes.map((n) => [n.id, n]));
     for (const edge of frame.links) {
@@ -434,11 +467,18 @@ export function App() {
       const linkId = `${edge.a}-${edge.b}`;
       activeLinks.add(linkId);
       const positions = [toCartesian(a), toCartesian(b)];
+      const selectedLink = selected?.kind === 'link' && selected.id === linkId;
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
       const linkKind = resolveLinkKind(a, b);
       const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
+      linkState.set(linkId, {
+        id: linkId,
+        kind: linkKind,
+        a,
+        b
+      });
       if (!lineEntity) {
         lineEntity = entities.add({
           id: `link-${linkId}`,
@@ -451,9 +491,9 @@ export function App() {
         linkEntitiesRef.current.set(linkId, lineEntity);
       } else {
         lineEntity.polyline.positions = positions;
-        lineEntity.polyline.width = style.width;
-        lineEntity.polyline.material = style.color;
       }
+      lineEntity.polyline.width = selectedLink ? style.width + 1.6 : style.width;
+      lineEntity.polyline.material = selectedLink ? SELECTED_LINK_COLOR : style.color;
       lineEntity.show = visible;
     }
 
@@ -474,7 +514,24 @@ export function App() {
       });
     }
     nodeStateRef.current = nodeState;
-  }, [frame, layerPrefs]);
+    linkStateRef.current = linkState;
+
+    if (selected?.kind === 'node') {
+      const node = nodeState.get(selected.id);
+      if (!node || !isNodeVisible(node, layerPrefs)) {
+        setSelected(null);
+      }
+    }
+    if (selected?.kind === 'link') {
+      const link = linkState.get(selected.id);
+      if (!link || !isNodeVisible(link.a, layerPrefs) || !isNodeVisible(link.b, layerPrefs) || !isLinkVisible(link.kind, layerPrefs)) {
+        setSelected(null);
+      }
+    }
+  }, [frame, layerPrefs, selected]);
+
+  const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
+  const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
 
   return (
     <div className="app-shell">
@@ -528,6 +585,39 @@ export function App() {
           <div>alt: {hoverInfo.node.alt_m.toFixed(0)} m</div>
         </div>
       ) : null}
+      <aside className={`detail-panel ${selected ? 'show' : ''}`}>
+        <div className="detail-header">
+          <strong>详情侧栏</strong>
+          <button type="button" onClick={() => setSelected(null)}>关闭</button>
+        </div>
+        {!selectedNode && !selectedLink ? (
+          <div className="detail-empty">点击节点或链路查看详情</div>
+        ) : null}
+        {selectedNode ? (
+          <div className="detail-block">
+            <div className="detail-title">节点 {selectedNode.name}</div>
+            <div>id: {selectedNode.id}</div>
+            <div>类别: {selectedNode.category}</div>
+            <div>轨道: {selectedNode.orbit_class || '-'}</div>
+            <div>纬度: {selectedNode.lat.toFixed(3)}</div>
+            <div>经度: {selectedNode.lon.toFixed(3)}</div>
+            <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
+            <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+          </div>
+        ) : null}
+        {selectedLink ? (
+          <div className="detail-block">
+            <div className="detail-title">链路 {selectedLink.id}</div>
+            <div>类型: {selectedLink.kind}</div>
+            <div>A: {selectedLink.a.name} ({selectedLink.a.id})</div>
+            <div>B: {selectedLink.b.name} ({selectedLink.b.id})</div>
+            <div>A 类别: {selectedLink.a.category}</div>
+            <div>B 类别: {selectedLink.b.category}</div>
+            <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
+            <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+          </div>
+        ) : null}
+      </aside>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
   );
