@@ -113,6 +113,34 @@ def test_satellite_mobile_edges_are_not_capped_by_count() -> None:
     assert int(selected[0].sum()) == 6
 
 
+def test_mobile_satellite_edges_are_capped_to_one_per_mobile() -> None:
+    cfg = SimulationConfig(
+        total_nodes=3,
+        leo_polar_count=2,
+        leo_inclined_count=0,
+        aircraft_count=1,
+        ship_count=0,
+        sat_isl_ports=4,
+    )
+    engine = TopologyEngine(cfg, seed=1, redis_client=InMemoryRedis())
+
+    candidate = np.zeros((3, 3), dtype=bool)
+    # One aircraft can see two satellites at the same time.
+    candidate[0, 2] = True
+    candidate[2, 0] = True
+    candidate[1, 2] = True
+    candidate[2, 1] = True
+
+    dist = np.full((3, 3), 9999.0, dtype=np.float64)
+    dist[0, 2] = dist[2, 0] = 100.0
+    dist[1, 2] = dist[2, 1] = 200.0
+
+    selected = engine._apply_capacity_constraints(candidate, dist)
+    assert int(selected[2, :2].sum()) == 1
+    assert bool(selected[0, 2])
+    assert not bool(selected[1, 2])
+
+
 def test_satellite_beam_rejects_far_off_nadir_target() -> None:
     cfg = SimulationConfig(
         total_nodes=2,
