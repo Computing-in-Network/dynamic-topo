@@ -73,6 +73,8 @@ class SimulationConfig:
     incremental_geometry: bool = False
     incremental_move_threshold_m: float = 1e-6
     incremental_rebuild_ratio: float = 0.35
+    qoe_kappa: float = 1.0
+    qoe_theta_hops: float = 4.0
 
 
 @dataclass(frozen=True)
@@ -541,6 +543,7 @@ class TopologyEngine:
             mobile_connected = int(np.sum(mobile_degree > 0))
             metrics["mobile_connected_count"] = mobile_connected
             metrics["mobile_connected_ratio"] = float(mobile_connected / mobile_degree.size)
+        metrics["qoe_imbalance"] = float(self._qoe_imbalance(result.adjacency))
 
         return TopologyFrame(
             sim_time_s=result.sim_time_s,
@@ -1071,6 +1074,56 @@ class TopologyEngine:
                 largest_size = len(nodes)
                 largest_nodes = np.array(nodes, dtype=np.int32)
         return comp_count, largest_size, largest_nodes
+
+    def _qoe_imbalance(self, adjacency: np.ndarray) -> float:
+        n = adjacency.shape[0]
+        m = n * (n - 1) // 2
+        if m <= 1:
+            return 0.0
+
+        dist = self._all_pairs_shortest_hops(adjacency)
+        iu, ju = np.triu_indices(n, k=1)
+        hops = dist[iu, ju].astype(np.float64)
+
+        q = np.zeros_like(hops, dtype=np.float64)
+        finite = hops >= 0.0
+        if np.any(finite):
+            z = self.config.qoe_kappa * (hops[finite] - self.config.qoe_theta_hops)
+            z = np.clip(z, -60.0, 60.0)
+            q[finite] = 1.0 / (1.0 + np.exp(z))
+
+        total_q = float(np.sum(q))
+        if total_q <= 0.0:
+            return 1.0
+
+        p = q / total_q
+        p = p[p > 0.0]
+        entropy = -float(np.sum(p * np.log(p)))
+        h_max = float(np.log(float(m)))
+        if h_max <= 0.0:
+            return 0.0
+        value = 1.0 - entropy / h_max
+        return float(np.clip(value, 0.0, 1.0))
+
+    def _all_pairs_shortest_hops(self, adjacency: np.ndarray) -> np.ndarray:
+        n = adjacency.shape[0]
+        dist = np.full((n, n), -1, dtype=np.int16)
+        for src in range(n):
+            queue = [src]
+            head = 0
+            dist[src, src] = 0
+            while head < len(queue):
+                u = queue[head]
+                head += 1
+                du = int(dist[src, u])
+                nbrs = np.where(adjacency[u])[0]
+                for v in nbrs:
+                    vv = int(v)
+                    if dist[src, vv] >= 0:
+                        continue
+                    dist[src, vv] = du + 1
+                    queue.append(vv)
+        return dist
 
     def _approx_component_diameter(self, adjacency: np.ndarray, nodes: np.ndarray) -> int:
         if nodes.size <= 1:
