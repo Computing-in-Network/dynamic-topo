@@ -4,7 +4,7 @@ services:
     container_name: topo-backend
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "${BACKEND_PORT:-8765}:8765"
 
   topo-frontend:
     image: ${IMAGE_REPO}/dynamic-topo-frontend:${IMAGE_TAG}
@@ -13,4 +13,4 @@ services:
     depends_on:
       - topo-backend
     ports:
-      - "5173:80"
+      - "${FRONTEND_PORT:-5173}:80"
