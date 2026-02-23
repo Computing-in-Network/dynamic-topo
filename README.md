@@ -61,6 +61,16 @@ VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 uv run python -m pytest -q
 ```
 
+## Git Flow 回退规范
+
+- 详见：`docs/gitflow_rollback.md`
+- 每次 `feature -> develop` 合并后请打回退标签：
+
+```bash
+./scripts/create_rollback_tag.sh <issue_number>
+git push origin <tag_name>
+```
+
 ## 使用 Gitea Actions + Docker 部署（一步步）
 
 1. 准备部署机（只做一次）
