@@ -14,6 +14,7 @@
   - 上下线 hysteresis（抗抖动）
 - Redis 写入：`node:pos`（Hash）与 `topo:adjacency`（Stream bitmap）
 - WebSocket 实时帧推流：节点经纬高、链路、统计指标
+- 统计指标包含连通分量、最大分量占比、直径近似等连通性信息
 - Cesium 前端：地球、节点运动、轨迹、实时链路
 
 ## 后端运行

@@ -450,6 +450,11 @@ class TopologyEngine:
             "max_degree": int(np.max(degree)),
             "link_flip_count_tick": int(self._last_flip_count),
         }
+        comp_count, largest_comp, largest_nodes = self._connected_components_summary(result.adjacency)
+        metrics["component_count"] = int(comp_count)
+        metrics["largest_component_size"] = int(largest_comp)
+        metrics["largest_component_ratio"] = float(largest_comp / max(1, self.config.total_nodes))
+        metrics["diameter_approx"] = int(self._approx_component_diameter(result.adjacency, largest_nodes))
         if self.config.aircraft_count + self.config.ship_count > 0:
             mobile_degree = degree[self._sat_count :]
             mobile_connected = int(np.sum(mobile_degree > 0))
@@ -836,6 +841,64 @@ class TopologyEngine:
                 "bitmap_hex": bitmap.tobytes().hex(),
             },
         )
+
+    def _connected_components_summary(self, adjacency: np.ndarray) -> tuple[int, int, np.ndarray]:
+        n = adjacency.shape[0]
+        visited = np.zeros(n, dtype=bool)
+        comp_count = 0
+        largest_size = 0
+        largest_nodes = np.array([], dtype=np.int32)
+
+        for s in range(n):
+            if visited[s]:
+                continue
+            comp_count += 1
+            stack = [s]
+            visited[s] = True
+            nodes: list[int] = []
+            while stack:
+                u = stack.pop()
+                nodes.append(u)
+                nbrs = np.where(adjacency[u])[0]
+                for v in nbrs:
+                    vv = int(v)
+                    if not visited[vv]:
+                        visited[vv] = True
+                        stack.append(vv)
+            if len(nodes) > largest_size:
+                largest_size = len(nodes)
+                largest_nodes = np.array(nodes, dtype=np.int32)
+        return comp_count, largest_size, largest_nodes
+
+    def _approx_component_diameter(self, adjacency: np.ndarray, nodes: np.ndarray) -> int:
+        if nodes.size <= 1:
+            return 0
+
+        node_set = set(int(x) for x in nodes.tolist())
+
+        def bfs_farthest(src: int) -> tuple[int, int]:
+            dist = {src: 0}
+            q = [src]
+            head = 0
+            far = src
+            while head < len(q):
+                u = q[head]
+                head += 1
+                du = dist[u]
+                if du > dist[far]:
+                    far = u
+                for v in np.where(adjacency[u])[0]:
+                    vv = int(v)
+                    if vv not in node_set or vv in dist:
+                        continue
+                    dist[vv] = du + 1
+                    q.append(vv)
+            return far, dist[far]
+
+        start = int(nodes[0])
+        a, _ = bfs_farthest(start)
+        _, diam = bfs_farthest(a)
+        return diam
 
 
 def estimated_working_set_mb(node_count: int = 300) -> float:
