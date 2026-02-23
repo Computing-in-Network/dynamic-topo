@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import numpy as np
 import pytest
 
@@ -13,6 +14,7 @@ from dynamic_topo.engine import (
     estimated_working_set_mb,
 )
 from dynamic_topo.storage import InMemoryRedis
+from scripts.generate_topology_snapshot import build_snapshot
 
 
 def build_engine() -> TopologyEngine:
@@ -204,9 +206,17 @@ def test_build_frame_contains_nodes_links_and_metrics() -> None:
     assert "avg_degree" in frame.metrics
     assert "max_degree" in frame.metrics
     assert "link_flip_count_tick" in frame.metrics
+    assert "component_count" in frame.metrics
+    assert "largest_component_size" in frame.metrics
+    assert "largest_component_ratio" in frame.metrics
+    assert "diameter_approx" in frame.metrics
     assert "mobile_connected_count" in frame.metrics
     assert "mobile_connected_ratio" in frame.metrics
     assert 0.0 <= frame.metrics["mobile_connected_ratio"] <= 1.0
+    assert frame.metrics["component_count"] >= 1
+    assert 1 <= frame.metrics["largest_component_size"] <= 300
+    assert 0.0 < frame.metrics["largest_component_ratio"] <= 1.0
+    assert frame.metrics["diameter_approx"] >= 0
     assert all("id" in node and "lat" in node and "lon" in node for node in frame.nodes)
     assert frame.nodes[0]["orbit_class"] == "polar"
     assert frame.nodes[100]["orbit_class"] == "inclined"
@@ -320,3 +330,43 @@ def test_min_link_down_hold_blocks_early_promote() -> None:
     assert not down[0, 1]
     assert not up1[0, 1]
     assert up2[0, 1]
+
+
+def test_topology_snapshot_matches_baseline() -> None:
+    baseline_path = Path("tests/fixtures/topology_snapshot.json")
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    current = build_snapshot(
+        steps=int(baseline["meta"]["steps"]),
+        dt=float(baseline["meta"]["dt"]),
+        seed=int(baseline["meta"]["seed"]),
+    )
+    assert current == baseline
+
+
+def test_incremental_geometry_matches_full_for_partial_updates() -> None:
+    cfg = SimulationConfig(
+        total_nodes=6,
+        leo_polar_count=2,
+        leo_inclined_count=0,
+        aircraft_count=2,
+        ship_count=2,
+        incremental_geometry=True,
+        incremental_move_threshold_m=0.1,
+        incremental_rebuild_ratio=0.9,
+    )
+    engine = TopologyEngine(cfg, seed=7, redis_client=InMemoryRedis())
+
+    result = engine.step(0.0, persist=False)
+    pos = result.node_positions_ecef.copy()
+    _ = engine._geometry_matrices_incremental(pos)
+
+    moved = pos.copy()
+    moved[-1, 0] += 25.0
+    moved[-1, 1] -= 11.0
+
+    los_i, dist_i, delta_i = engine._geometry_matrices_incremental(moved)
+    los_f, dist_f, delta_f = engine._geometry_matrices(moved)
+
+    assert np.array_equal(los_i, los_f)
+    assert np.allclose(dist_i, dist_f)
+    assert np.allclose(delta_i, delta_f)

@@ -62,6 +62,14 @@ const defaultLayerPrefs = {
   showLabels: true,
   showOrbits: true
 };
+const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
+const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
+const STALE_WARN_MS = 2500;
+const STALE_ERROR_MS = 5000;
+const INGEST_FPS_WARN = 0.7;
+const FRAME_QUEUE_MAX = 600;
+const SPEED_OPTIONS = [0.5, 1, 2];
+const ORBIT_UPDATE_INTERVAL_TICKS = 4;
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -180,6 +188,16 @@ export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
   const [hoverInfo, setHoverInfo] = useState(null);
+  const [selected, setSelected] = useState(null);
+  const [runtimeHealth, setRuntimeHealth] = useState({
+    stalenessMs: 0,
+    ingestFps: 0
+  });
+  const [playback, setPlayback] = useState({
+    paused: false,
+    speed: 1
+  });
+  const [queueDepth, setQueueDepth] = useState(0);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -199,9 +217,15 @@ export function App() {
   const trailPointsRef = useRef(new Map());
   const orbitEntitiesRef = useRef(new Map());
   const linkEntitiesRef = useRef(new Map());
+  const linkVisualStateRef = useRef(new Map());
   const pickHandlerRef = useRef(null);
   const nodeStateRef = useRef(new Map());
+  const linkStateRef = useRef(new Map());
   const nodeVisibilityRef = useRef(new Map());
+  const lastFrameAtRef = useRef(0);
+  const frameTimestampsRef = useRef([]);
+  const frameQueueRef = useRef([]);
+  const orbitCacheRef = useRef(new Map());
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -213,6 +237,25 @@ export function App() {
 
   function resetLayerPrefs() {
     setLayerPrefs(defaultLayerPrefs);
+  }
+
+  function shiftFrameFromQueue() {
+    if (frameQueueRef.current.length === 0) {
+      setQueueDepth(0);
+      return false;
+    }
+    const nextFrame = frameQueueRef.current.shift();
+    setQueueDepth(frameQueueRef.current.length);
+    if (nextFrame) {
+      setFrame(nextFrame);
+      return true;
+    }
+    return false;
+  }
+
+  function stepOnce() {
+    setPlayback((prev) => ({ ...prev, paused: true }));
+    shiftFrameFromQueue();
   }
 
   useEffect(() => {
@@ -276,6 +319,29 @@ export function App() {
         node
       });
     }, ScreenSpaceEventType.MOUSE_MOVE);
+    pickHandler.setInputAction((movement) => {
+      const picked = viewer.scene.pick(movement.position);
+      if (!defined(picked) || !picked?.id?.id || typeof picked.id.id !== 'string') {
+        setSelected(null);
+        return;
+      }
+      const pickedId = picked.id.id;
+      if (pickedId.startsWith('node-')) {
+        const nodeId = pickedId.slice(5);
+        if (!nodeVisibilityRef.current.get(nodeId)) {
+          setSelected(null);
+          return;
+        }
+        setSelected({ kind: 'node', id: nodeId });
+        return;
+      }
+      if (pickedId.startsWith('link-')) {
+        const linkId = pickedId.slice(5);
+        setSelected({ kind: 'link', id: linkId });
+        return;
+      }
+      setSelected(null);
+    }, ScreenSpaceEventType.LEFT_CLICK);
 
     viewerRef.current = viewer;
     pickHandlerRef.current = pickHandler;
@@ -290,15 +356,55 @@ export function App() {
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
-    ws.onopen = () => setConnected(true);
+    ws.onopen = () => {
+      setConnected(true);
+      lastFrameAtRef.current = Date.now();
+      frameTimestampsRef.current = [];
+      frameQueueRef.current = [];
+      setQueueDepth(0);
+    };
     ws.onclose = () => setConnected(false);
     ws.onerror = () => setConnected(false);
     ws.onmessage = (evt) => {
+      const now = Date.now();
+      lastFrameAtRef.current = now;
+      frameTimestampsRef.current.push(now);
       const payload = JSON.parse(evt.data);
-      setFrame(payload);
+      frameQueueRef.current.push(payload);
+      if (frameQueueRef.current.length > FRAME_QUEUE_MAX) {
+        frameQueueRef.current.shift();
+      }
+      setQueueDepth(frameQueueRef.current.length);
     };
     return () => ws.close();
   }, []);
+
+  useEffect(() => {
+    if (playback.paused) {
+      return undefined;
+    }
+    const intervalMs = Math.max(80, Math.floor(1000 / playback.speed));
+    const timer = window.setInterval(() => {
+      shiftFrameFromQueue();
+    }, intervalMs);
+    return () => window.clearInterval(timer);
+  }, [playback.paused, playback.speed]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      const now = Date.now();
+      const stamps = frameTimestampsRef.current.filter((t) => now - t <= 10_000);
+      frameTimestampsRef.current = stamps;
+      let ingestFps = 0;
+      if (stamps.length >= 2) {
+        const spanMs = Math.max(1, stamps[stamps.length - 1] - stamps[0]);
+        ingestFps = ((stamps.length - 1) * 1000) / spanMs;
+      }
+      const stalenessMs = connected ? Math.max(0, now - (lastFrameAtRef.current || now)) : 0;
+      setRuntimeHealth({ stalenessMs, ingestFps });
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [connected]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -308,14 +414,18 @@ export function App() {
 
     const entities = viewer.entities;
     const activeNodeIds = new Set();
+    const nodePositionMap = new Map();
+    const frameTick = Math.floor(frame.sim_time_s ?? 0);
 
     for (const node of frame.nodes) {
       activeNodeIds.add(node.id);
       const position = toCartesian(node);
+      nodePositionMap.set(node.id, position);
       const color = typeColor[node.type] || Color.WHITE;
       const nodeVisible = isNodeVisible(node, layerPrefs);
       nodeVisibilityRef.current.set(node.id, nodeVisible);
 
+      const selectedNode = selected?.kind === 'node' && selected.id === node.id;
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
       const labelScale = node.type === 'leo' ? 0.45 : 0.35;
@@ -350,6 +460,10 @@ export function App() {
         nodeEntity.position = position;
       }
       nodeEntity.show = nodeVisible;
+      if (nodeEntity.billboard) {
+        nodeEntity.billboard.scale = selectedNode ? 1.35 : 1.0;
+        nodeEntity.billboard.color = selectedNode ? SELECTED_NODE_COLOR : color;
+      }
       if (nodeEntity.label) {
         nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
       }
@@ -379,7 +493,24 @@ export function App() {
       trailEntity.show = nodeVisible && layerPrefs.showTrails;
 
       if (node.type === 'leo') {
-        const orbitPositions = buildSatelliteOrbitPolyline(node);
+        let orbitPositions = null;
+        const orbitCache = orbitCacheRef.current.get(node.id);
+        const shouldRecompute =
+          !orbitCache ||
+          orbitCache.orbitClass !== node.orbit_class ||
+          frameTick - orbitCache.tick >= ORBIT_UPDATE_INTERVAL_TICKS;
+        if (shouldRecompute) {
+          orbitPositions = buildSatelliteOrbitPolyline(node);
+          if (orbitPositions) {
+            orbitCacheRef.current.set(node.id, {
+              orbitClass: node.orbit_class,
+              tick: frameTick,
+              positions: orbitPositions
+            });
+          }
+        } else {
+          orbitPositions = orbitCache.positions;
+        }
         if (orbitPositions) {
           let orbitEntity = orbitEntitiesRef.current.get(node.id);
           if (!orbitEntity) {
@@ -417,10 +548,12 @@ export function App() {
       if (!activeNodeIds.has(id)) {
         entities.remove(ent);
         orbitEntitiesRef.current.delete(id);
+        orbitCacheRef.current.delete(id);
       }
     }
 
     const activeLinks = new Set();
+    const linkState = new Map();
     const degreeCount = new Map();
     const nodeMap = new Map(frame.nodes.map((n) => [n.id, n]));
     for (const edge of frame.links) {
@@ -433,12 +566,24 @@ export function App() {
       degreeCount.set(edge.b, (degreeCount.get(edge.b) || 0) + 1);
       const linkId = `${edge.a}-${edge.b}`;
       activeLinks.add(linkId);
-      const positions = [toCartesian(a), toCartesian(b)];
+      const pa = nodePositionMap.get(a.id);
+      const pb = nodePositionMap.get(b.id);
+      if (!pa || !pb) {
+        continue;
+      }
+      const positions = [pa, pb];
+      const selectedLink = selected?.kind === 'link' && selected.id === linkId;
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
       const linkKind = resolveLinkKind(a, b);
       const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
+      linkState.set(linkId, {
+        id: linkId,
+        kind: linkKind,
+        a,
+        b
+      });
       if (!lineEntity) {
         lineEntity = entities.add({
           id: `link-${linkId}`,
@@ -449,18 +594,37 @@ export function App() {
           }
         });
         linkEntitiesRef.current.set(linkId, lineEntity);
+        linkVisualStateRef.current.set(linkId, {
+          width: style.width,
+          selected: selectedLink,
+          kind: linkKind
+        });
       } else {
         lineEntity.polyline.positions = positions;
-        lineEntity.polyline.width = style.width;
-        lineEntity.polyline.material = style.color;
+      }
+      const visual = linkVisualStateRef.current.get(linkId);
+      const expectedWidth = selectedLink ? style.width + 1.6 : style.width;
+      const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
+      if (widthChanged) {
+        lineEntity.polyline.width = expectedWidth;
+      }
+      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind;
+      if (materialChanged) {
+        lineEntity.polyline.material = selectedLink ? SELECTED_LINK_COLOR : style.color;
       }
       lineEntity.show = visible;
+      linkVisualStateRef.current.set(linkId, {
+        width: expectedWidth,
+        selected: selectedLink,
+        kind: linkKind
+      });
     }
 
     for (const [id, ent] of linkEntitiesRef.current) {
       if (!activeLinks.has(id)) {
         entities.remove(ent);
         linkEntitiesRef.current.delete(id);
+        linkVisualStateRef.current.delete(id);
       }
     }
 
@@ -474,13 +638,68 @@ export function App() {
       });
     }
     nodeStateRef.current = nodeState;
-  }, [frame, layerPrefs]);
+    linkStateRef.current = linkState;
+
+    if (selected?.kind === 'node') {
+      const node = nodeState.get(selected.id);
+      if (!node || !isNodeVisible(node, layerPrefs)) {
+        setSelected(null);
+      }
+    }
+    if (selected?.kind === 'link') {
+      const link = linkState.get(selected.id);
+      if (!link || !isNodeVisible(link.a, layerPrefs) || !isNodeVisible(link.b, layerPrefs) || !isLinkVisible(link.kind, layerPrefs)) {
+        setSelected(null);
+      }
+    }
+  }, [frame, layerPrefs, selected]);
+
+  const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
+  const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
+  const alerts = [];
+  if (!connected) {
+    alerts.push({ level: 'error', text: 'WebSocket 已断开' });
+  }
+  if (connected && runtimeHealth.stalenessMs >= STALE_ERROR_MS) {
+    alerts.push({ level: 'error', text: `数据延迟过高：${(runtimeHealth.stalenessMs / 1000).toFixed(1)}s` });
+  } else if (connected && runtimeHealth.stalenessMs >= STALE_WARN_MS) {
+    alerts.push({ level: 'warn', text: `数据延迟偏高：${(runtimeHealth.stalenessMs / 1000).toFixed(1)}s` });
+  }
+  if (connected && runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN) {
+    alerts.push({ level: 'warn', text: `帧率偏低：${runtimeHealth.ingestFps.toFixed(2)} fps` });
+  }
 
   return (
     <div className="app-shell">
       <div className="hud">
         <h1>Dynamic Topology - Deploy Check 2026-02-20</h1>
         <p>Status: {connected ? 'connected' : 'disconnected'}</p>
+        <div className="status-badges">
+          <span className={`badge ${connected ? 'ok' : 'error'}`}>{connected ? '连接正常' : '连接中断'}</span>
+          <span className={`badge ${runtimeHealth.stalenessMs >= STALE_ERROR_MS ? 'error' : runtimeHealth.stalenessMs >= STALE_WARN_MS ? 'warn' : 'ok'}`}>
+            延迟 {runtimeHealth.stalenessMs}ms
+          </span>
+          <span className={`badge ${runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN ? 'warn' : 'ok'}`}>
+            帧率 {runtimeHealth.ingestFps.toFixed(2)}fps
+          </span>
+        </div>
+        <div className="time-controls">
+          <button type="button" onClick={() => setPlayback((p) => ({ ...p, paused: !p.paused }))}>
+            {playback.paused ? '继续' : '暂停'}
+          </button>
+          <button type="button" onClick={stepOnce}>单步</button>
+          {SPEED_OPTIONS.map((sp) => (
+            <button
+              type="button"
+              key={`speed-${sp}`}
+              className={playback.speed === sp ? 'active' : ''}
+              onClick={() => setPlayback((p) => ({ ...p, speed: sp }))}
+            >
+              {sp}x
+            </button>
+          ))}
+          <span className="queue-chip">缓冲 {queueDepth}</span>
+        </div>
         <p>WS: {WS_URL}</p>
         <p>t: {frame ? frame.sim_time_s.toFixed(1) : '-'} s</p>
         <p>nodes: {frame ? frame.nodes.length : 0}</p>
@@ -489,6 +708,17 @@ export function App() {
         <p>mobile connected: {frame ? `${frame.metrics.mobile_connected_count ?? 0}/${(frame.nodes.filter((n) => n.type !== 'leo').length || 1)}` : '-'}</p>
         <p>mobile ratio: {frame ? `${((frame.metrics.mobile_connected_ratio ?? 0) * 100).toFixed(1)}%` : '-'}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
+        <div className="alert-box">
+          {alerts.length === 0 ? (
+            <div className="alert-row ok">当前无告警</div>
+          ) : (
+            alerts.map((a, idx) => (
+              <div key={`${a.level}-${idx}`} className={`alert-row ${a.level}`}>
+                {a.text}
+              </div>
+            ))
+          )}
+        </div>
         <div className="legend">
           <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
           <div className="legend-item"><span className="swatch sat-sat" />satellite-satellite link</div>
@@ -528,6 +758,39 @@ export function App() {
           <div>alt: {hoverInfo.node.alt_m.toFixed(0)} m</div>
         </div>
       ) : null}
+      <aside className={`detail-panel ${selected ? 'show' : ''}`}>
+        <div className="detail-header">
+          <strong>详情侧栏</strong>
+          <button type="button" onClick={() => setSelected(null)}>关闭</button>
+        </div>
+        {!selectedNode && !selectedLink ? (
+          <div className="detail-empty">点击节点或链路查看详情</div>
+        ) : null}
+        {selectedNode ? (
+          <div className="detail-block">
+            <div className="detail-title">节点 {selectedNode.name}</div>
+            <div>id: {selectedNode.id}</div>
+            <div>类别: {selectedNode.category}</div>
+            <div>轨道: {selectedNode.orbit_class || '-'}</div>
+            <div>纬度: {selectedNode.lat.toFixed(3)}</div>
+            <div>经度: {selectedNode.lon.toFixed(3)}</div>
+            <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
+            <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+          </div>
+        ) : null}
+        {selectedLink ? (
+          <div className="detail-block">
+            <div className="detail-title">链路 {selectedLink.id}</div>
+            <div>类型: {selectedLink.kind}</div>
+            <div>A: {selectedLink.a.name} ({selectedLink.a.id})</div>
+            <div>B: {selectedLink.b.name} ({selectedLink.b.id})</div>
+            <div>A 类别: {selectedLink.a.category}</div>
+            <div>B 类别: {selectedLink.b.category}</div>
+            <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
+            <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+          </div>
+        ) : null}
+      </aside>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
   );

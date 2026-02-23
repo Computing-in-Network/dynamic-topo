@@ -69,6 +69,9 @@ class SimulationConfig:
     enforce_ship_ocean_mask: bool = True
     link_policy_path: str | None = None
     link_policy_hot_reload: bool = False
+    incremental_geometry: bool = False
+    incremental_move_threshold_m: float = 1e-6
+    incremental_rebuild_ratio: float = 0.35
 
 
 @dataclass(frozen=True)
@@ -320,6 +323,13 @@ class TopologyEngine:
         self._state_age_ticks = np.full((n, n), np.uint16(65535), dtype=np.uint16)
         self._last_flip_count = 0
         self._apply_link_policy(reset_hysteresis=True)
+        self._init_incremental_cache()
+
+    def _init_incremental_cache(self) -> None:
+        self._cached_positions: np.ndarray | None = None
+        self._cached_los: np.ndarray | None = None
+        self._cached_dist: np.ndarray | None = None
+        self._cached_delta: np.ndarray | None = None
 
     def _apply_link_policy(self, reset_hysteresis: bool) -> None:
         p = self._link_policy
@@ -450,6 +460,11 @@ class TopologyEngine:
             "max_degree": int(np.max(degree)),
             "link_flip_count_tick": int(self._last_flip_count),
         }
+        comp_count, largest_comp, largest_nodes = self._connected_components_summary(result.adjacency)
+        metrics["component_count"] = int(comp_count)
+        metrics["largest_component_size"] = int(largest_comp)
+        metrics["largest_component_ratio"] = float(largest_comp / max(1, self.config.total_nodes))
+        metrics["diameter_approx"] = int(self._approx_component_diameter(result.adjacency, largest_nodes))
         if self.config.aircraft_count + self.config.ship_count > 0:
             mobile_degree = degree[self._sat_count :]
             mobile_connected = int(np.sum(mobile_degree > 0))
@@ -575,7 +590,7 @@ class TopologyEngine:
         return lat2, lon2
 
     def _adjacency_from_positions(self, positions: np.ndarray) -> np.ndarray:
-        los, dist, delta = self._geometry_matrices(positions)
+        los, dist, delta = self._geometry_matrices_incremental(positions)
         candidate = los & (dist <= self._dmax_matrix)
         np.fill_diagonal(candidate, False)
 
@@ -597,6 +612,79 @@ class TopologyEngine:
         np.fill_diagonal(stable, False)
         stable = np.logical_or(stable, stable.T)
         return stable
+
+    def _geometry_matrices_incremental(self, positions: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not self.config.incremental_geometry:
+            los, dist, delta = self._geometry_matrices(positions)
+            self._cached_positions = positions.copy()
+            self._cached_los = los.copy()
+            self._cached_dist = dist.copy()
+            self._cached_delta = delta.copy()
+            return los, dist, delta
+
+        if (
+            self._cached_positions is None
+            or self._cached_los is None
+            or self._cached_dist is None
+            or self._cached_delta is None
+            or self._cached_positions.shape != positions.shape
+        ):
+            los, dist, delta = self._geometry_matrices(positions)
+            self._cached_positions = positions.copy()
+            self._cached_los = los.copy()
+            self._cached_dist = dist.copy()
+            self._cached_delta = delta.copy()
+            return los, dist, delta
+
+        moved = np.linalg.norm(positions - self._cached_positions, axis=1) > self.config.incremental_move_threshold_m
+        affected = np.where(moved)[0]
+        n = positions.shape[0]
+        if affected.size == 0:
+            return self._cached_los, self._cached_dist, self._cached_delta
+
+        ratio = affected.size / max(1, n)
+        if ratio >= self.config.incremental_rebuild_ratio:
+            los, dist, delta = self._geometry_matrices(positions)
+            self._cached_positions = positions.copy()
+            self._cached_los = los.copy()
+            self._cached_dist = dist.copy()
+            self._cached_delta = delta.copy()
+            return los, dist, delta
+
+        los = self._cached_los.copy()
+        dist = self._cached_dist.copy()
+        delta = self._cached_delta.copy()
+        earth_sq = EARTH_RADIUS_M * EARTH_RADIUS_M
+
+        for idx in affected.tolist():
+            i = int(idx)
+            row_delta = positions - positions[i]
+            col_delta = positions[i] - positions
+            delta[i, :, :] = row_delta
+            delta[:, i, :] = col_delta
+
+            seg_len_sq = np.sum(row_delta * row_delta, axis=1)
+            seg_len_sq = np.where(seg_len_sq == 0.0, 1.0, seg_len_sq)
+            row_dist = np.sqrt(seg_len_sq)
+
+            t = -np.sum(positions[i] * row_delta, axis=1) / seg_len_sq
+            t = np.clip(t, 0.0, 1.0)
+            closest = positions[i] + t[:, np.newaxis] * row_delta
+            closest_sq = np.sum(closest * closest, axis=1)
+            row_los = closest_sq > earth_sq
+            row_los[i] = False
+
+            dist[i, :] = row_dist
+            dist[:, i] = row_dist
+            los[i, :] = row_los
+            los[:, i] = row_los
+
+        np.fill_diagonal(los, False)
+        self._cached_positions = positions.copy()
+        self._cached_los = los
+        self._cached_dist = dist
+        self._cached_delta = delta
+        return los, dist, delta
 
     def _same_plane_sat_neighbors(self, sat_idx: int) -> tuple[int, int]:
         if sat_idx < self._polar_count:
@@ -836,6 +924,64 @@ class TopologyEngine:
                 "bitmap_hex": bitmap.tobytes().hex(),
             },
         )
+
+    def _connected_components_summary(self, adjacency: np.ndarray) -> tuple[int, int, np.ndarray]:
+        n = adjacency.shape[0]
+        visited = np.zeros(n, dtype=bool)
+        comp_count = 0
+        largest_size = 0
+        largest_nodes = np.array([], dtype=np.int32)
+
+        for s in range(n):
+            if visited[s]:
+                continue
+            comp_count += 1
+            stack = [s]
+            visited[s] = True
+            nodes: list[int] = []
+            while stack:
+                u = stack.pop()
+                nodes.append(u)
+                nbrs = np.where(adjacency[u])[0]
+                for v in nbrs:
+                    vv = int(v)
+                    if not visited[vv]:
+                        visited[vv] = True
+                        stack.append(vv)
+            if len(nodes) > largest_size:
+                largest_size = len(nodes)
+                largest_nodes = np.array(nodes, dtype=np.int32)
+        return comp_count, largest_size, largest_nodes
+
+    def _approx_component_diameter(self, adjacency: np.ndarray, nodes: np.ndarray) -> int:
+        if nodes.size <= 1:
+            return 0
+
+        node_set = set(int(x) for x in nodes.tolist())
+
+        def bfs_farthest(src: int) -> tuple[int, int]:
+            dist = {src: 0}
+            q = [src]
+            head = 0
+            far = src
+            while head < len(q):
+                u = q[head]
+                head += 1
+                du = dist[u]
+                if du > dist[far]:
+                    far = u
+                for v in np.where(adjacency[u])[0]:
+                    vv = int(v)
+                    if vv not in node_set or vv in dist:
+                        continue
+                    dist[vv] = du + 1
+                    q.append(vv)
+            return far, dist[far]
+
+        start = int(nodes[0])
+        a, _ = bfs_farthest(start)
+        _, diam = bfs_farthest(a)
+        return diam
 
 
 def estimated_working_set_mb(node_count: int = 300) -> float:

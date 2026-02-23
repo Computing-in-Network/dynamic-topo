@@ -1,0 +1,166 @@
+{
+  "meta": {
+    "seed": 7,
+    "steps": 6,
+    "dt": 1.0,
+    "total_nodes": 300,
+    "node_counts": {
+      "leo_polar": 100,
+      "leo_inclined": 100,
+      "aircraft": 50,
+      "ship": 50
+    }
+  },
+  "frames": [
+    {
+      "sim_time_s": 0.0,
+      "edge_count": 200,
+      "avg_degree": 1.333333,
+      "max_degree": 2,
+      "mobile_connected_count": 0,
+      "mobile_connected_ratio": 0.0,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "fd529aaaafd1249197e38fb4bff6bbcb25bf3e70",
+      "position_sha1": "c023c10c1a82480e40c2f33a9d8c11113e370167",
+      "first_12_links": [
+        "SAT-INCL-001-SAT-INCL-011",
+        "SAT-INCL-001-SAT-INCL-091",
+        "SAT-INCL-002-SAT-INCL-012",
+        "SAT-INCL-002-SAT-INCL-092",
+        "SAT-INCL-003-SAT-INCL-013",
+        "SAT-INCL-003-SAT-INCL-093",
+        "SAT-INCL-004-SAT-INCL-014",
+        "SAT-INCL-004-SAT-INCL-094",
+        "SAT-INCL-005-SAT-INCL-015",
+        "SAT-INCL-005-SAT-INCL-095",
+        "SAT-INCL-006-SAT-INCL-016",
+        "SAT-INCL-006-SAT-INCL-096"
+      ]
+    },
+    {
+      "sim_time_s": 1.0,
+      "edge_count": 652,
+      "avg_degree": 4.346667,
+      "max_degree": 10,
+      "mobile_connected_count": 70,
+      "mobile_connected_ratio": 0.7,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "be8824be7d5a6ceae62c3d4b78376a2a416c3a6c",
+      "position_sha1": "d0fd9714594d9f4b64ac606ab0b149db665a4337",
+      "first_12_links": [
+        "AIR-001-SAT-INCL-018",
+        "AIR-001-SAT-INCL-044",
+        "AIR-002-SAT-INCL-023",
+        "AIR-002-SAT-INCL-024",
+        "AIR-002-SAT-INCL-032",
+        "AIR-002-SAT-POLAR-026",
+        "AIR-002-SAT-POLAR-040",
+        "AIR-003-SAT-INCL-012",
+        "AIR-003-SAT-INCL-021",
+        "AIR-003-SAT-INCL-040",
+        "AIR-003-SAT-INCL-049",
+        "AIR-003-SAT-POLAR-013"
+      ]
+    },
+    {
+      "sim_time_s": 2.0,
+      "edge_count": 709,
+      "avg_degree": 4.726667,
+      "max_degree": 10,
+      "mobile_connected_count": 70,
+      "mobile_connected_ratio": 0.7,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "eea4b4e6522ccc172b4444f5ac76973e91460a8c",
+      "position_sha1": "492520a0af85621c9e48a8bca2f8348172562305",
+      "first_12_links": [
+        "AIR-001-SAT-INCL-018",
+        "AIR-001-SAT-INCL-044",
+        "AIR-002-SAT-INCL-023",
+        "AIR-002-SAT-INCL-024",
+        "AIR-002-SAT-INCL-032",
+        "AIR-002-SAT-POLAR-026",
+        "AIR-002-SAT-POLAR-040",
+        "AIR-003-SAT-INCL-012",
+        "AIR-003-SAT-INCL-021",
+        "AIR-003-SAT-INCL-040",
+        "AIR-003-SAT-INCL-049",
+        "AIR-003-SAT-POLAR-013"
+      ]
+    },
+    {
+      "sim_time_s": 3.0,
+      "edge_count": 708,
+      "avg_degree": 4.72,
+      "max_degree": 10,
+      "mobile_connected_count": 70,
+      "mobile_connected_ratio": 0.7,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "7532bddd1559938ab6f9b0d6d89395687026fae1",
+      "position_sha1": "ebaac1f41c25f3e27f2b34f3e970b674fe79bb2e",
+      "first_12_links": [
+        "AIR-001-SAT-INCL-018",
+        "AIR-001-SAT-INCL-044",
+        "AIR-002-SAT-INCL-023",
+        "AIR-002-SAT-INCL-024",
+        "AIR-002-SAT-INCL-032",
+        "AIR-002-SAT-POLAR-026",
+        "AIR-002-SAT-POLAR-040",
+        "AIR-003-SAT-INCL-012",
+        "AIR-003-SAT-INCL-021",
+        "AIR-003-SAT-INCL-040",
+        "AIR-003-SAT-INCL-049",
+        "AIR-003-SAT-POLAR-013"
+      ]
+    },
+    {
+      "sim_time_s": 4.0,
+      "edge_count": 709,
+      "avg_degree": 4.726667,
+      "max_degree": 10,
+      "mobile_connected_count": 70,
+      "mobile_connected_ratio": 0.7,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "5899b83d638b12cad321aeef487b051627484ed1",
+      "position_sha1": "54e48b6a8a07db4bc59e2619f840c1bc275e244a",
+      "first_12_links": [
+        "AIR-001-SAT-INCL-018",
+        "AIR-001-SAT-INCL-044",
+        "AIR-002-SAT-INCL-023",
+        "AIR-002-SAT-INCL-024",
+        "AIR-002-SAT-INCL-032",
+        "AIR-002-SAT-POLAR-026",
+        "AIR-002-SAT-POLAR-040",
+        "AIR-003-SAT-INCL-012",
+        "AIR-003-SAT-INCL-021",
+        "AIR-003-SAT-INCL-040",
+        "AIR-003-SAT-INCL-049",
+        "AIR-003-SAT-POLAR-013"
+      ]
+    },
+    {
+      "sim_time_s": 5.0,
+      "edge_count": 709,
+      "avg_degree": 4.726667,
+      "max_degree": 10,
+      "mobile_connected_count": 70,
+      "mobile_connected_ratio": 0.7,
+      "link_flip_count_tick": 4,
+      "adjacency_sha1": "c2e494f6eb7aed6a637cb7e7bd87bd7b02fba266",
+      "position_sha1": "c339f41f5c0f77850d7e4e4f566b5cf60c0531a7",
+      "first_12_links": [
+        "AIR-001-SAT-INCL-018",
+        "AIR-001-SAT-INCL-044",
+        "AIR-002-SAT-INCL-023",
+        "AIR-002-SAT-INCL-024",
+        "AIR-002-SAT-INCL-032",
+        "AIR-002-SAT-POLAR-026",
+        "AIR-002-SAT-POLAR-040",
+        "AIR-003-SAT-INCL-012",
+        "AIR-003-SAT-INCL-021",
+        "AIR-003-SAT-INCL-040",
+        "AIR-003-SAT-INCL-049",
+        "AIR-003-SAT-POLAR-013"
+      ]
+    }
+  ]
+}
