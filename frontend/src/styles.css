@@ -309,6 +309,38 @@ body,
   color: #ffffff;
 }
 
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.detail-actions button,
+.fault-item button {
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ecf2fb;
+  border-radius: 8px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.fault-item {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px;
+  margin: 6px 0;
+  background: rgba(0, 0, 0, 0.12);
+  font-size: 12px;
+}
+
+.fault-target {
+  color: #dce6f2;
+  margin: 4px 0 6px;
+}
+
 @media (max-width: 900px) {
   .hud {
     top: 10px;

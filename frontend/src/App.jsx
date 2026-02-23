@@ -63,6 +63,7 @@ const defaultLayerPrefs = {
   showOrbits: true
 };
 const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
+const DAMAGED_NODE_COLOR = Color.fromCssColorString('#ff595e');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
@@ -198,6 +199,8 @@ export function App() {
     speed: 1
   });
   const [queueDepth, setQueueDepth] = useState(0);
+  const [faults, setFaults] = useState([]);
+  const [controlStatus, setControlStatus] = useState('');
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -226,6 +229,7 @@ export function App() {
   const frameTimestampsRef = useRef([]);
   const frameQueueRef = useRef([]);
   const orbitCacheRef = useRef(new Map());
+  const wsRef = useRef(null);
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -256,6 +260,16 @@ export function App() {
   function stepOnce() {
     setPlayback((prev) => ({ ...prev, paused: true }));
     shiftFrameFromQueue();
+  }
+
+  function sendControl(action, extra = {}) {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setControlStatus('控制通道未连接');
+      return;
+    }
+    const request_id = `req-${Date.now()}`;
+    ws.send(JSON.stringify({ action, request_id, ...extra }));
   }
 
   useEffect(() => {
@@ -356,28 +370,56 @@ export function App() {
 
   useEffect(() => {
     const ws = new WebSocket(WS_URL);
+    wsRef.current = ws;
     ws.onopen = () => {
       setConnected(true);
       lastFrameAtRef.current = Date.now();
       frameTimestampsRef.current = [];
       frameQueueRef.current = [];
       setQueueDepth(0);
+      setControlStatus('');
     };
-    ws.onclose = () => setConnected(false);
-    ws.onerror = () => setConnected(false);
+    ws.onclose = () => {
+      setConnected(false);
+      wsRef.current = null;
+    };
+    ws.onerror = () => {
+      setConnected(false);
+      wsRef.current = null;
+    };
     ws.onmessage = (evt) => {
+      const payload = JSON.parse(evt.data);
+      if (payload && payload.type === 'control_ack') {
+        if (Array.isArray(payload.faults)) {
+          setFaults(payload.faults);
+        }
+        if (payload.ok) {
+          setControlStatus(payload.deduplicated ? '已存在相同故障，已去重' : '控制操作成功');
+        } else {
+          setControlStatus(payload.error || '控制操作失败');
+        }
+        return;
+      }
       const now = Date.now();
       lastFrameAtRef.current = now;
       frameTimestampsRef.current.push(now);
-      const payload = JSON.parse(evt.data);
       frameQueueRef.current.push(payload);
       if (frameQueueRef.current.length > FRAME_QUEUE_MAX) {
         frameQueueRef.current.shift();
       }
       setQueueDepth(frameQueueRef.current.length);
     };
-    return () => ws.close();
+    return () => {
+      wsRef.current = null;
+      ws.close();
+    };
   }, []);
+
+  const damagedNodeIds = new Set(
+    faults
+      .filter((f) => f.fault_type === 'DAMAGED' && f.target?.node_id)
+      .map((f) => f.target.node_id)
+  );
 
   useEffect(() => {
     if (playback.paused) {
@@ -426,6 +468,7 @@ export function App() {
       nodeVisibilityRef.current.set(node.id, nodeVisible);
 
       const selectedNode = selected?.kind === 'node' && selected.id === node.id;
+      const isDamagedNode = damagedNodeIds.has(node.id);
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
       const labelScale = node.type === 'leo' ? 0.45 : 0.35;
@@ -462,7 +505,9 @@ export function App() {
       nodeEntity.show = nodeVisible;
       if (nodeEntity.billboard) {
         nodeEntity.billboard.scale = selectedNode ? 1.35 : 1.0;
-        nodeEntity.billboard.color = selectedNode ? SELECTED_NODE_COLOR : color;
+        nodeEntity.billboard.color = isDamagedNode
+          ? DAMAGED_NODE_COLOR
+          : (selectedNode ? SELECTED_NODE_COLOR : color);
       }
       if (nodeEntity.label) {
         nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
@@ -707,7 +752,10 @@ export function App() {
         <p>avg degree: {frame ? frame.metrics.avg_degree.toFixed(2) : '-'}</p>
         <p>mobile connected: {frame ? `${frame.metrics.mobile_connected_count ?? 0}/${(frame.nodes.filter((n) => n.type !== 'leo').length || 1)}` : '-'}</p>
         <p>mobile ratio: {frame ? `${((frame.metrics.mobile_connected_ratio ?? 0) * 100).toFixed(1)}%` : '-'}</p>
+        <p>fault nodes: {frame ? frame.metrics.fault_node_count ?? 0 : 0}</p>
+        <p>fault links: {frame ? frame.metrics.fault_link_count ?? 0 : 0}</p>
         <p>tick: {frame ? frame.elapsed_ms.toFixed(2) : '-'} ms</p>
+        <p>control: {controlStatus || '-'}</p>
         <div className="alert-box">
           {alerts.length === 0 ? (
             <div className="alert-row ok">当前无告警</div>
@@ -776,6 +824,11 @@ export function App() {
             <div>经度: {selectedNode.lon.toFixed(3)}</div>
             <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
             <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+            <div className="detail-actions">
+              <button type="button" onClick={() => sendControl('inject_node_fault', { node_id: selectedNode.id })}>
+                注入节点故障
+              </button>
+            </div>
           </div>
         ) : null}
         {selectedLink ? (
@@ -788,8 +841,40 @@ export function App() {
             <div>B 类别: {selectedLink.b.category}</div>
             <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
             <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+            <div className="detail-actions">
+              <button
+                type="button"
+                onClick={() => sendControl('inject_link_fault', { a: selectedLink.a.id, b: selectedLink.b.id })}
+              >
+                注入链路故障
+              </button>
+            </div>
           </div>
         ) : null}
+        <div className="detail-block">
+          <div className="detail-title">故障列表</div>
+          {faults.length === 0 ? (
+            <div>当前无人工故障</div>
+          ) : (
+            faults.map((fault) => (
+              <div key={fault.fault_id} className="fault-item">
+                <div>{fault.fault_type} - {fault.fault_id}</div>
+                <div className="fault-target">
+                  {fault.fault_type === 'DAMAGED'
+                    ? `node=${fault.target?.node_id || '-'}`
+                    : `a=${fault.target?.a || '-'}, b=${fault.target?.b || '-'}`}
+                </div>
+                <button type="button" onClick={() => sendControl('clear_fault', { fault_id: fault.fault_id })}>
+                  解除该故障
+                </button>
+              </div>
+            ))
+          )}
+          <div className="detail-actions">
+            <button type="button" onClick={() => sendControl('list_faults')}>刷新故障列表</button>
+            <button type="button" onClick={() => sendControl('clear_all_faults')}>解除全部故障</button>
+          </div>
+        </div>
       </aside>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
