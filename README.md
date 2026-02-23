@@ -61,6 +61,12 @@ VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 uv run python -m pytest -q
 ```
 
+更新拓扑回归快照基线：
+
+```bash
+uv run python scripts/generate_topology_snapshot.py --output tests/fixtures/topology_snapshot.json
+```
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`
