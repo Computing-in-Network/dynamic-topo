@@ -341,3 +341,32 @@ def test_topology_snapshot_matches_baseline() -> None:
         seed=int(baseline["meta"]["seed"]),
     )
     assert current == baseline
+
+
+def test_incremental_geometry_matches_full_for_partial_updates() -> None:
+    cfg = SimulationConfig(
+        total_nodes=6,
+        leo_polar_count=2,
+        leo_inclined_count=0,
+        aircraft_count=2,
+        ship_count=2,
+        incremental_geometry=True,
+        incremental_move_threshold_m=0.1,
+        incremental_rebuild_ratio=0.9,
+    )
+    engine = TopologyEngine(cfg, seed=7, redis_client=InMemoryRedis())
+
+    result = engine.step(0.0, persist=False)
+    pos = result.node_positions_ecef.copy()
+    _ = engine._geometry_matrices_incremental(pos)
+
+    moved = pos.copy()
+    moved[-1, 0] += 25.0
+    moved[-1, 1] -= 11.0
+
+    los_i, dist_i, delta_i = engine._geometry_matrices_incremental(moved)
+    los_f, dist_f, delta_f = engine._geometry_matrices(moved)
+
+    assert np.array_equal(los_i, los_f)
+    assert np.allclose(dist_i, dist_f)
+    assert np.allclose(delta_i, delta_f)
