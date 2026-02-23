@@ -83,6 +83,7 @@ git push origin <tag_name>
 
 - 变更日志：`CHANGELOG.md`
 - 发布说明：`docs/releases/v0.2.0.md`
+- 发布说明（最新）：`docs/releases/v0.2.1.md`
 - 发布检查清单：`docs/release_checklist.md`
 
 ## 使用 Gitea Actions + Docker 部署（一步步）
