@@ -79,12 +79,24 @@ export class MonitorApiClient {
     const path = `/api/v1/monitor/snapshot${query ? `?${query}` : ''}`;
     const url = joinUrl(this.baseUrl, path);
     const token = options.token || this.token;
+    const headers = {
+      ...(token ? { 'x-api-token': token } : {})
+    };
+    if (options.etag) {
+      headers['If-None-Match'] = options.etag;
+    }
     const res = await this.fetchImpl(url, {
       method: 'GET',
-      headers: {
-        ...(token ? { 'x-api-token': token } : {})
-      }
+      headers
     });
+    if (res.status === 304) {
+      return {
+        notModified: true,
+        status: 304,
+        etag: res.headers?.get?.('etag') || options.etag || '',
+        data: null
+      };
+    }
     let data = {};
     try {
       data = await res.json();
@@ -94,6 +106,51 @@ export class MonitorApiClient {
     if (!res.ok || data.status === 'error') {
       throw new MonitorApiError(data.error_message || data.message || `HTTP ${res.status}`, {
         code: data.error_code || data.code || MONITOR_ERROR_CODE.INVALID_PAYLOAD,
+        status: res.status,
+        payload: data
+      });
+    }
+    return {
+      notModified: false,
+      status: res.status,
+      etag: res.headers?.get?.('etag') || '',
+      data
+    };
+  }
+
+  async getHealth(options = {}) {
+    const url = joinUrl(this.baseUrl, '/health');
+    const token = options.token || this.token;
+    const res = await this.fetchImpl(url, {
+      method: 'GET',
+      headers: {
+        ...(token ? { 'x-api-token': token } : {})
+      }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new MonitorApiError(`HTTP ${res.status}`, {
+        code: MONITOR_ERROR_CODE.INVALID_PAYLOAD,
+        status: res.status,
+        payload: data
+      });
+    }
+    return data;
+  }
+
+  async getMetrics(options = {}) {
+    const url = joinUrl(this.baseUrl, '/metrics');
+    const token = options.token || this.token;
+    const res = await this.fetchImpl(url, {
+      method: 'GET',
+      headers: {
+        ...(token ? { 'x-api-token': token } : {})
+      }
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new MonitorApiError(`HTTP ${res.status}`, {
+        code: MONITOR_ERROR_CODE.INVALID_PAYLOAD,
         status: res.status,
         payload: data
       });

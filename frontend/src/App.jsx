@@ -312,6 +312,8 @@ export function App() {
   const [monitorLastSuccessAt, setMonitorLastSuccessAt] = useState(0);
   const [alarmSeverityFilter, setAlarmSeverityFilter] = useState('all');
   const [alarmScopeFilter, setAlarmScopeFilter] = useState('all');
+  const [collectorHealth, setCollectorHealth] = useState(null);
+  const [collectorMetrics, setCollectorMetrics] = useState(null);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -346,6 +348,7 @@ export function App() {
   const metricHistoryRef = useRef({ nodes: new Map(), links: new Map() });
   const monitorFailureRef = useRef(0);
   const monitorLastSuccessRef = useRef(0);
+  const monitorEtagRef = useRef('');
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -378,12 +381,25 @@ export function App() {
 
     async function pullSnapshot() {
       try {
-        const raw = await monitorClientRef.current.getSnapshot({
-          topologyEpoch: monitorEpoch
+        const rawResult = await monitorClientRef.current.getSnapshot({
+          topologyEpoch: monitorEpoch,
+          etag: monitorEtagRef.current
         });
         if (disposed) {
           return;
         }
+        monitorEtagRef.current = rawResult.etag || monitorEtagRef.current;
+        if (rawResult.notModified) {
+          setMonitorSourceMode('snapshot');
+          setMonitorError('');
+          monitorFailureRef.current = 0;
+          setMonitorConsecutiveFailures(0);
+          monitorLastSuccessRef.current = Date.now();
+          setMonitorLastSuccessAt(monitorLastSuccessRef.current);
+          return;
+        }
+
+        const raw = rawResult.data || {};
         const monitor = raw?.monitor || {};
         setMonitorSnapshot((prev) => applyMonitorSnapshot(prev, raw));
         setMonitorSourceMode('snapshot');
@@ -434,6 +450,38 @@ export function App() {
       }
     };
   }, [monitorEpoch]);
+
+  useEffect(() => {
+    if (ENABLE_MONITOR_MOCK || !monitorClientRef.current) {
+      return undefined;
+    }
+    let disposed = false;
+    async function pullStatus() {
+      try {
+        const [health, metrics] = await Promise.all([
+          monitorClientRef.current.getHealth(),
+          monitorClientRef.current.getMetrics()
+        ]);
+        if (disposed) {
+          return;
+        }
+        setCollectorHealth(health);
+        setCollectorMetrics(metrics);
+      } catch {
+        if (disposed) {
+          return;
+        }
+        setCollectorHealth(null);
+        setCollectorMetrics(null);
+      }
+    }
+    pullStatus();
+    const timer = window.setInterval(pullStatus, 5000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     const ts = Date.parse(monitorSnapshot.updatedAt || '');
@@ -1466,6 +1514,9 @@ export function App() {
           <p>mode: {monitorSourceMode}</p>
           <p>failures: {monitorConsecutiveFailures}</p>
           <p>last success: {monitorLastSuccessAt ? new Date(monitorLastSuccessAt).toLocaleTimeString() : '-'}</p>
+          <p>collector nats: {collectorHealth?.nats_connected == null ? '-' : (collectorHealth.nats_connected ? 'up' : 'down')}</p>
+          <p>collector total: {collectorMetrics?.total ?? '-'}</p>
+          <p>collector success_rate: {collectorMetrics?.success_rate != null ? Number(collectorMetrics.success_rate).toFixed(2) : '-'}</p>
           <div className="monitor-epoch-row">
             <span>epoch</span>
             <select
