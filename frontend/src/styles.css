@@ -711,3 +711,29 @@ body,
     max-height: 38vh;
   }
 }
+
+.monitor-analysis {
+  margin-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  padding-top: 8px;
+}
+
+.analysis-block {
+  margin-top: 6px;
+  border: 1px solid rgba(125, 255, 0, 0.35);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(125, 255, 0, 0.08);
+  font-size: 12px;
+  color: #e7eef8;
+}
+
+.analysis-error {
+  margin-top: 6px;
+  border: 1px solid rgba(255, 93, 93, 0.45);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 93, 93, 0.16);
+  font-size: 12px;
+  color: #ffd6d6;
+}

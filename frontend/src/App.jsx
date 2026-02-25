@@ -321,6 +321,10 @@ export function App() {
   const [alarmScopeFilter, setAlarmScopeFilter] = useState('all');
   const [collectorHealth, setCollectorHealth] = useState(null);
   const [collectorMetrics, setCollectorMetrics] = useState(null);
+  const [pathAnalysis, setPathAnalysis] = useState(null);
+  const [faultSpread, setFaultSpread] = useState(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisError, setAnalysisError] = useState('');
   const [replayMode, setReplayMode] = useState(false);
   const [showLayerPanel, setShowLayerPanel] = useState(false);
   const [showFaultPanel, setShowFaultPanel] = useState(false);
@@ -717,6 +721,104 @@ export function App() {
       : `定位失败：当前拓扑中找不到链路 ${link.a}<->${link.b}`;
     setMonitorActionStatus(msg);
     pushToast(msg, ok ? 'ok' : 'warn');
+  }
+  async function runAdvancedAnalysis() {
+    if (!monitorClientRef.current || !frame) {
+      setAnalysisError('分析失败：monitor API 或拓扑帧不可用');
+      return;
+    }
+    try {
+      setAnalysisLoading(true);
+      setAnalysisError('');
+
+      const byLink = Object.values(monitorSnapshot.byLink || {});
+      const metrics = {};
+      const linkHealth = new Map();
+      for (const item of byLink) {
+        const src = resolveTopoNodeId(item.srcNodeUid || item.srcNodeId) || item.srcNodeId || item.srcNodeUid;
+        const dst = resolveTopoNodeId(item.dstNodeUid || item.dstNodeId) || item.dstNodeId || item.dstNodeUid;
+        if (!src || !dst) {
+          continue;
+        }
+        const key = [src, dst].sort().join('<->');
+        metrics[key] = {
+          latency_ms: item.rttMs ?? 0,
+          loss_rate: item.lossRate ?? 0,
+          jitter_ms: item.jitterMs ?? 0
+        };
+        const h = item.health === 'critical' ? 0.2 : item.health === 'warning' ? 0.5 : item.health === 'normal' ? 0.9 : 0.7;
+        linkHealth.set(key, h);
+      }
+
+      const links = (frame.links || []).map((e) => {
+        const a = e.a;
+        const b = e.b;
+        const k = [a, b].sort().join('<->');
+        return { src: a, dst: b, health: linkHealth.get(k) ?? 0.8 };
+      });
+
+      let src = '';
+      let dst = '';
+      if (selectedFlow?.path?.length > 1) {
+        src = selectedFlow.path[0];
+        dst = selectedFlow.path[selectedFlow.path.length - 1];
+      } else if (selectedLink) {
+        src = selectedLink.a.id;
+        dst = selectedLink.b.id;
+      } else if ((frame.nodes || []).length >= 2) {
+        src = frame.nodes[0].id;
+        dst = frame.nodes[1].id;
+      }
+
+      const alarm = timelineAlarms.find((a) => a.id === selectedMonitorAlarmId) || filteredTimelineAlarms[0] || null;
+      let alarmNodes = [];
+      if (alarm?.scopeType === 'node') {
+        const n = resolveTopoNodeId(alarm.scopeUid || alarm.scopeId) || alarm.scopeUid || alarm.scopeId;
+        if (n) {
+          alarmNodes = [n];
+        }
+      } else if (alarm?.scopeType === 'link') {
+        const lk = parseScopedLink(alarm.scopeUid || alarm.scopeId);
+        if (lk) {
+          alarmNodes = [resolveTopoNodeId(lk.a) || lk.a, resolveTopoNodeId(lk.b) || lk.b].filter(Boolean);
+        }
+      }
+      if (alarmNodes.length === 0) {
+        alarmNodes = [src].filter(Boolean);
+      }
+
+      const [pathResp, spreadResp] = await Promise.all([
+        monitorClientRef.current.queryPathAnalysis({
+          task_id: selectedFlow?.flowId || undefined,
+          biz: 'frontend_live',
+          src,
+          dst,
+          top_n: 3,
+          max_hops: 6,
+          links,
+          metrics
+        }),
+        monitorClientRef.current.analyzeFaultSpread({
+          alarm_nodes: alarmNodes,
+          mode: 'cascade',
+          max_depth: 3,
+          cascade_threshold: 0.6,
+          links
+        })
+      ]);
+
+      setPathAnalysis(pathResp?.result || null);
+      setFaultSpread(spreadResp?.result || null);
+      setMonitorActionStatus('已刷新路径分析与故障传播结果');
+      pushToast('高级分析已更新', 'ok');
+    } catch (err) {
+      const msg = err?.message || '高级分析失败';
+      setAnalysisError(msg);
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
+    } finally {
+      setAnalysisLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -1790,6 +1892,7 @@ export function App() {
               ))
             )}
           </div>
+
           <div className="monitor-flow-list">
             <div className="layer-header">
               <span>flow 路径</span>
@@ -1811,6 +1914,29 @@ export function App() {
                 </div>
               ))
             )}
+          </div>
+          <div className="monitor-analysis">
+            <div className="layer-header">
+              <span>高级分析</span>
+              <div className="monitor-header-actions">
+                <button type="button" onClick={runAdvancedAnalysis} disabled={analysisLoading}>{analysisLoading ? '分析中...' : '运行分析'}</button>
+              </div>
+            </div>
+            {analysisError ? <div className="analysis-error">{analysisError}</div> : null}
+            {pathAnalysis ? (
+              <div className="analysis-block">
+                <div><strong>Path</strong>: {pathAnalysis.src || '-'} -&gt; {pathAnalysis.dst || '-'}</div>
+                <div>TopN: {pathAnalysis.top_n ?? '-'}, candidates: {pathAnalysis.total_candidates ?? '-'}</div>
+                <div>Best score: {pathAnalysis.paths?.[0]?.score ?? '-'}</div>
+              </div>
+            ) : null}
+            {faultSpread ? (
+              <div className="analysis-block">
+                <div><strong>Spread</strong>: mode={faultSpread.mode || '-'}</div>
+                <div>impacted: {faultSpread.impacted_nodes?.length ?? 0}, boundary: {faultSpread.boundary_nodes?.length ?? 0}</div>
+                <div>fallback: {faultSpread.fallback ? 'yes' : 'no'}</div>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>

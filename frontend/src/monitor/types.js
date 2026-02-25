@@ -21,7 +21,11 @@ export const MONITOR_ERROR_CODE = Object.freeze({
   DUPLICATE: 'DUPLICATE',
   INVALID_PAYLOAD: 'INVALID_PAYLOAD',
   INVALID_KIND: 'INVALID_KIND',
-  UNAUTHORIZED: 'UNAUTHORIZED'
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  NATS_UNAVAILABLE: 'NATS_UNAVAILABLE',
+  EPOCH_MAPPING_NOT_FOUND: 'EPOCH_MAPPING_NOT_FOUND',
+  UNKNOWN_NODE_UID: 'UNKNOWN_NODE_UID',
+  UNKNOWN_LINK_UID: 'UNKNOWN_LINK_UID'
 });
 
 export function normalizeMonitorKind(kind) {
@@ -31,4 +35,3 @@ export function normalizeMonitorKind(kind) {
 export function isValidSchemaVersion(schemaVersion) {
   return schemaVersion === MONITOR_SCHEMA_VERSION;
 }
-

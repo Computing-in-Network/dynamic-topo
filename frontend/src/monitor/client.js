@@ -28,6 +28,34 @@ export class MonitorApiClient {
     this.fetchImpl = options.fetchImpl || window.fetch.bind(window);
   }
 
+  async _request(path, options = {}) {
+    const token = options.token || this.token;
+    const headers = {
+      ...(options.json ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { 'x-api-token': token } : {}),
+      ...(options.headers || {})
+    };
+    const res = await this.fetchImpl(joinUrl(this.baseUrl, path), {
+      method: options.method || 'GET',
+      headers,
+      body: options.body
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch {
+      data = {};
+    }
+    if (!res.ok || data.status === 'error') {
+      throw new MonitorApiError(data.error_message || data.message || `HTTP ${res.status}`, {
+        code: data.error_code || data.code || MONITOR_ERROR_CODE.INVALID_PAYLOAD,
+        status: res.status,
+        payload: data
+      });
+    }
+    return { res, data };
+  }
+
   async ingest(kind, event, options = {}) {
     const normalizedKind = normalizeMonitorKind(kind);
     if (!normalizedKind) {
@@ -44,29 +72,12 @@ export class MonitorApiClient {
       schema_version: MONITOR_SCHEMA_VERSION,
       ...event
     };
-    const url = joinUrl(this.baseUrl, `/api/v1/ingest/${normalizedKind}`);
-    const token = options.token || this.token;
-    const res = await this.fetchImpl(url, {
+    const { data } = await this._request(`/api/v1/ingest/${normalizedKind}`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { 'x-api-token': token } : {})
-      },
-      body: JSON.stringify(payload)
+      json: true,
+      body: JSON.stringify(payload),
+      token: options.token
     });
-    let data = {};
-    try {
-      data = await res.json();
-    } catch {
-      data = {};
-    }
-    if (!res.ok || data.status === 'error') {
-      throw new MonitorApiError(data.message || `HTTP ${res.status}`, {
-        code: data.error_code || data.code || MONITOR_ERROR_CODE.INVALID_PAYLOAD,
-        status: res.status,
-        payload: data
-      });
-    }
     return data;
   }
 
@@ -77,7 +88,6 @@ export class MonitorApiClient {
     }
     const query = params.toString();
     const path = `/api/v1/monitor/snapshot${query ? `?${query}` : ''}`;
-    const url = joinUrl(this.baseUrl, path);
     const token = options.token || this.token;
     const headers = {
       ...(token ? { 'x-api-token': token } : {})
@@ -85,7 +95,7 @@ export class MonitorApiClient {
     if (options.etag) {
       headers['If-None-Match'] = options.etag;
     }
-    const res = await this.fetchImpl(url, {
+    const res = await this.fetchImpl(joinUrl(this.baseUrl, path), {
       method: 'GET',
       headers
     });
@@ -119,42 +129,38 @@ export class MonitorApiClient {
   }
 
   async getHealth(options = {}) {
-    const url = joinUrl(this.baseUrl, '/health');
-    const token = options.token || this.token;
-    const res = await this.fetchImpl(url, {
+    const { data } = await this._request('/health', {
       method: 'GET',
-      headers: {
-        ...(token ? { 'x-api-token': token } : {})
-      }
+      token: options.token
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new MonitorApiError(`HTTP ${res.status}`, {
-        code: MONITOR_ERROR_CODE.INVALID_PAYLOAD,
-        status: res.status,
-        payload: data
-      });
-    }
     return data;
   }
 
   async getMetrics(options = {}) {
-    const url = joinUrl(this.baseUrl, '/metrics');
-    const token = options.token || this.token;
-    const res = await this.fetchImpl(url, {
+    const { data } = await this._request('/metrics', {
       method: 'GET',
-      headers: {
-        ...(token ? { 'x-api-token': token } : {})
-      }
+      token: options.token
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new MonitorApiError(`HTTP ${res.status}`, {
-        code: MONITOR_ERROR_CODE.INVALID_PAYLOAD,
-        status: res.status,
-        payload: data
-      });
-    }
+    return data;
+  }
+
+  async queryPathAnalysis(payload, options = {}) {
+    const { data } = await this._request('/api/v1/analysis/path/query', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
+    return data;
+  }
+
+  async analyzeFaultSpread(payload, options = {}) {
+    const { data } = await this._request('/api/v1/fault/spread/analyze', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
     return data;
   }
 }
