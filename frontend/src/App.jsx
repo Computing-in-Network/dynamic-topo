@@ -325,6 +325,7 @@ export function App() {
   const [faultSpread, setFaultSpread] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
+  const [analysisSupported, setAnalysisSupported] = useState(true);
   const [replayMode, setReplayMode] = useState(false);
   const [showLayerPanel, setShowLayerPanel] = useState(false);
   const [showFaultPanel, setShowFaultPanel] = useState(false);
@@ -727,6 +728,11 @@ export function App() {
       setAnalysisError('分析失败：monitor API 或拓扑帧不可用');
       return;
     }
+    if (!analysisSupported) {
+      setAnalysisError('当前后端未启用高级分析接口');
+      pushToast('当前后端未启用高级分析接口', 'warn');
+      return;
+    }
     try {
       setAnalysisLoading(true);
       setAnalysisError('');
@@ -786,6 +792,20 @@ export function App() {
       if (alarmNodes.length === 0) {
         alarmNodes = [src].filter(Boolean);
       }
+      if (!src || !dst) {
+        const msg = '分析失败：无法确定有效的源/目的节点';
+        setAnalysisError(msg);
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
+        return;
+      }
+      if ((links || []).length === 0) {
+        const msg = '分析失败：当前拓扑无可用链路';
+        setAnalysisError(msg);
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
+        return;
+      }
 
       const [pathResp, spreadResp] = await Promise.all([
         monitorClientRef.current.queryPathAnalysis({
@@ -811,8 +831,12 @@ export function App() {
       setFaultSpread(spreadResp?.result || null);
       setMonitorActionStatus('已刷新路径分析与故障传播结果');
       pushToast('高级分析已更新', 'ok');
+      setAnalysisSupported(true);
     } catch (err) {
       const msg = err?.message || '高级分析失败';
+      if ([404, 405, 501].includes(err?.status)) {
+        setAnalysisSupported(false);
+      }
       setAnalysisError(msg);
       setMonitorActionStatus(msg);
       pushToast(msg, 'warn');
@@ -1919,7 +1943,7 @@ export function App() {
             <div className="layer-header">
               <span>高级分析</span>
               <div className="monitor-header-actions">
-                <button type="button" onClick={runAdvancedAnalysis} disabled={analysisLoading}>{analysisLoading ? '分析中...' : '运行分析'}</button>
+                <button type="button" onClick={runAdvancedAnalysis} disabled={analysisLoading || !analysisSupported}>{analysisLoading ? '分析中...' : (analysisSupported ? '运行分析' : '接口不可用')}</button>
               </div>
             </div>
             {analysisError ? <div className="analysis-error">{analysisError}</div> : null}

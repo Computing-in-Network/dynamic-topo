@@ -70,3 +70,47 @@ test('getSnapshot handles 304 not modified', async () => {
   assert.equal(res.status, 304);
   assert.equal(res.etag, 'W/"1708848000-11"');
 });
+
+test('queryPathAnalysis posts payload', async () => {
+  let capturedPath = '';
+  let capturedBody = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      capturedPath = url;
+      capturedBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', result: { paths: [] } };
+        }
+      };
+    }
+  });
+  await client.queryPathAnalysis({ src: 'A', dst: 'B' });
+  assert.equal(capturedPath, 'http://collector/api/v1/analysis/path/query');
+  assert.equal(capturedBody, JSON.stringify({ src: 'A', dst: 'B' }));
+});
+
+test('analyzeFaultSpread posts payload', async () => {
+  let capturedPath = '';
+  let capturedBody = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      capturedPath = url;
+      capturedBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', result: { impacted_nodes: [] } };
+        }
+      };
+    }
+  });
+  await client.analyzeFaultSpread({ alarm_nodes: ['A'] });
+  assert.equal(capturedPath, 'http://collector/api/v1/fault/spread/analyze');
+  assert.equal(capturedBody, JSON.stringify({ alarm_nodes: ['A'] }));
+});
