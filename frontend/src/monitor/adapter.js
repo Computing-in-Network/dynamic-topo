@@ -51,6 +51,7 @@ function upsertAlarm(snapshot, alarm) {
     severity,
     title: alarm.title || '未命名告警',
     scopeType: alarm.scope_type || 'unknown',
+    scopeUid: alarm.scope_uid || '',
     scopeId: alarm.scope_id || '-',
     detail: alarm.detail || '',
     timestamp: alarm.timestamp || new Date().toISOString()
@@ -90,6 +91,10 @@ export function applyMonitorEvent(snapshot, inputEvent, options = {}) {
     ];
     next.byNode[event.node_id] = {
       nodeId: event.node_id,
+      nodeUid: event.node_uid || event.docker_name || event.node_id,
+      topoNodeId: event.topo_node_id || event.node_id,
+      dockerName: event.docker_name || '',
+      dockerIp: event.docker_ip || '',
       cpuRatio: event.cpu_ratio ?? null,
       memRatio: event.mem_ratio ?? null,
       txBps: event.tx_bps ?? null,
@@ -110,8 +115,11 @@ export function applyMonitorEvent(snapshot, inputEvent, options = {}) {
     ];
     next.byLink[event.link_id] = {
       linkId: event.link_id,
+      linkUid: event.link_uid || event.link_id,
       srcNodeId: event.src_node_id || '',
       dstNodeId: event.dst_node_id || '',
+      srcNodeUid: event.src_node_uid || event.src_node_id || '',
+      dstNodeUid: event.dst_node_uid || event.dst_node_id || '',
       state: event.state || 'UNKNOWN',
       lossRate: event.loss_rate ?? null,
       rttMs: event.rtt_ms ?? null,
@@ -128,6 +136,8 @@ export function applyMonitorEvent(snapshot, inputEvent, options = {}) {
       flowId: event.flow_id,
       srcNodeId: event.src_node_id || '',
       dstNodeId: event.dst_node_id || '',
+      srcNodeUid: event.src_node_uid || event.src_node_id || '',
+      dstNodeUid: event.dst_node_uid || event.dst_node_id || '',
       bps: event.bps ?? null,
       path: Array.isArray(event.path) ? event.path : [],
       priority: event.priority || ''
@@ -185,6 +195,10 @@ export function applyMonitorSnapshot(snapshot, rawSnapshot, options = {}) {
     }
     next.byNode[item.node_id] = {
       nodeId: item.node_id,
+      nodeUid: item.node_uid || item.docker_name || item.node_id,
+      topoNodeId: item.topo_node_id || item.node_id,
+      dockerName: item.docker_name || '',
+      dockerIp: item.docker_ip || '',
       cpuRatio: item.cpu_ratio ?? null,
       memRatio: item.mem_ratio ?? null,
       txBps: item.tx_bps ?? null,
@@ -203,8 +217,11 @@ export function applyMonitorSnapshot(snapshot, rawSnapshot, options = {}) {
     }
     next.byLink[item.link_id] = {
       linkId: item.link_id,
+      linkUid: item.link_uid || item.link_id,
       srcNodeId: item.src_node_id || '',
       dstNodeId: item.dst_node_id || '',
+      srcNodeUid: item.src_node_uid || item.src_node_id || '',
+      dstNodeUid: item.dst_node_uid || item.dst_node_id || '',
       state: item.state || 'UNKNOWN',
       lossRate: item.loss_rate ?? null,
       rttMs: item.rtt_ms ?? null,

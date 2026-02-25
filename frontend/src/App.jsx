@@ -98,6 +98,10 @@ function parseScopedLink(scopeId) {
   if (!clean) {
     return null;
   }
+  if (clean.includes('<->')) {
+    const [a, b] = clean.split('<->').map((part) => part.trim());
+    return a && b ? { a, b } : null;
+  }
   if (clean.includes('->')) {
     const [a, b] = clean.split('->').map((part) => part.trim());
     return a && b ? { a, b } : null;
@@ -106,11 +110,14 @@ function parseScopedLink(scopeId) {
     const [a, b] = clean.split('|').map((part) => part.trim());
     return a && b ? { a, b } : null;
   }
-  if (clean.includes('-')) {
-    const [a, b] = clean.split('-').map((part) => part.trim());
-    return a && b ? { a, b } : null;
-  }
   return null;
+}
+
+function normalizeIdentity(value) {
+  if (value == null) {
+    return '';
+  }
+  return String(value).trim().toLowerCase();
 }
 
 function svgDataUri(svg) {
@@ -349,6 +356,7 @@ export function App() {
   const monitorFailureRef = useRef(0);
   const monitorLastSuccessRef = useRef(0);
   const monitorEtagRef = useRef('');
+  const topoNodeAliasRef = useRef(new Map());
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -636,16 +644,30 @@ export function App() {
     return true;
   }
 
+  function resolveTopoNodeId(identity) {
+    if (!identity) {
+      return '';
+    }
+    const raw = String(identity).trim();
+    if (nodeStateRef.current.has(raw)) {
+      return raw;
+    }
+    const key = normalizeIdentity(raw);
+    return topoNodeAliasRef.current.get(key) || '';
+  }
+
   function focusMonitorAlarm(alarm) {
     if (!alarm) {
       return;
     }
     setSelectedMonitorAlarmId(alarm.id);
     if (alarm.scopeType === 'node') {
-      const node = nodeStateRef.current.get(alarm.scopeId);
+      const lookup = alarm.scopeUid || alarm.scopeId;
+      const topoNodeId = resolveTopoNodeId(lookup);
+      const node = topoNodeId ? nodeStateRef.current.get(topoNodeId) : null;
       const viewer = viewerRef.current;
       if (!node || !viewer) {
-        setMonitorActionStatus(`定位失败：当前拓扑中找不到节点 ${alarm.scopeId || '-'}`);
+        setMonitorActionStatus(`定位失败：当前拓扑中找不到节点 ${lookup || '-'}`);
         return;
       }
       setSelected({ kind: 'node', id: node.id });
@@ -656,14 +678,16 @@ export function App() {
       setMonitorActionStatus(`已定位节点 ${node.id}`);
       return;
     }
-    const link = parseScopedLink(alarm.scopeId);
+    const link = parseScopedLink(alarm.scopeUid || alarm.scopeId);
     if (!link) {
-      setMonitorActionStatus(`定位失败：无法解析 scope_id (${alarm.scopeId || '-'})`);
+      setMonitorActionStatus(`定位失败：无法解析 scope (${alarm.scopeUid || alarm.scopeId || '-'})`);
       return;
     }
-    const ok = focusLinkByNodes(link.a, link.b);
+    const aTopo = resolveTopoNodeId(link.a);
+    const bTopo = resolveTopoNodeId(link.b);
+    const ok = focusLinkByNodes(aTopo || link.a, bTopo || link.b);
     setMonitorActionStatus(ok
-      ? `已定位链路 ${link.a}<->${link.b}`
+      ? `已定位链路 ${(aTopo || link.a)}<->${(bTopo || link.b)}`
       : `定位失败：当前拓扑中找不到链路 ${link.a}<->${link.b}`);
   }
 
@@ -1169,6 +1193,7 @@ export function App() {
     }
 
     const nodeState = new Map();
+    const topoAlias = new Map();
     for (const node of frame.nodes) {
       const degree = degreeCount.get(node.id) || 0;
       nodeState.set(node.id, {
@@ -1176,8 +1201,31 @@ export function App() {
         degree,
         has_link: degree > 0
       });
+      topoAlias.set(normalizeIdentity(node.id), node.id);
+      if (node.name) {
+        topoAlias.set(normalizeIdentity(node.name), node.id);
+      }
+    }
+    for (const metric of Object.values(monitorSnapshot.byNode)) {
+      const topoNodeId = metric.topoNodeId || metric.nodeId || '';
+      if (!topoNodeId || !nodeState.has(topoNodeId)) {
+        continue;
+      }
+      const aliases = [
+        metric.nodeUid,
+        metric.nodeId,
+        metric.topoNodeId,
+        metric.dockerName
+      ];
+      for (const alias of aliases) {
+        const key = normalizeIdentity(alias);
+        if (key) {
+          topoAlias.set(key, topoNodeId);
+        }
+      }
     }
     nodeStateRef.current = nodeState;
+    topoNodeAliasRef.current = topoAlias;
     linkStateRef.current = linkState;
 
     if (selected?.kind === 'node') {
@@ -1192,7 +1240,7 @@ export function App() {
         setSelected(null);
       }
     }
-  }, [frame, layerPrefs, selected, faults, selectedFlowId, monitorSnapshot.byFlow]);
+  }, [frame, layerPrefs, selected, faults, selectedFlowId, monitorSnapshot.byFlow, monitorSnapshot.byNode]);
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
@@ -1203,17 +1251,35 @@ export function App() {
       flowEdgeKeys.add(edgeKey(selectedFlow.path[i], selectedFlow.path[i + 1]));
     }
   }
-  const selectedNodeMetric = selectedNode ? monitorSnapshot.byNode[selectedNode.id] : null;
+  const selectedNodeMetric = selectedNode
+    ? (Object.values(monitorSnapshot.byNode).find((item) => {
+      const candidates = [
+        item.nodeId,
+        item.nodeUid,
+        item.topoNodeId,
+        item.dockerName
+      ].map(normalizeIdentity);
+      return candidates.includes(normalizeIdentity(selectedNode.id));
+    }) || null)
+    : null;
   const selectedLinkMetric = selectedLink
     ? Object.values(monitorSnapshot.byLink).find((item) => {
-      if (!item || !item.srcNodeId || !item.dstNodeId) {
+      if (!item) {
         return false;
       }
-      const src = item.srcNodeId;
-      const dst = item.dstNodeId;
+      const srcCandidates = [
+        item.srcNodeId,
+        item.srcNodeUid
+      ].map((v) => resolveTopoNodeId(v) || v).map(normalizeIdentity);
+      const dstCandidates = [
+        item.dstNodeId,
+        item.dstNodeUid
+      ].map((v) => resolveTopoNodeId(v) || v).map(normalizeIdentity);
+      const aId = normalizeIdentity(selectedLink.a.id);
+      const bId = normalizeIdentity(selectedLink.b.id);
       return (
-        (src === selectedLink.a.id && dst === selectedLink.b.id) ||
-          (src === selectedLink.b.id && dst === selectedLink.a.id)
+        (srcCandidates.includes(aId) && dstCandidates.includes(bId)) ||
+          (srcCandidates.includes(bId) && dstCandidates.includes(aId))
       );
     }) || null
     : null;
@@ -1412,6 +1478,8 @@ export function App() {
             <div>经度: {selectedNode.lon.toFixed(3)}</div>
             <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
             <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+            <div>docker: {selectedNodeMetric?.dockerName || '-'}</div>
+            <div>docker ip: {selectedNodeMetric?.dockerIp || '-'}</div>
             <div>monitor health: {selectedNodeMetric?.health || '-'}</div>
             <div>cpu: {selectedNodeMetric?.cpuRatio != null ? `${(selectedNodeMetric.cpuRatio * 100).toFixed(1)}%` : '--'}</div>
             <div>mem: {selectedNodeMetric?.memRatio != null ? `${(selectedNodeMetric.memRatio * 100).toFixed(1)}%` : '--'}</div>
@@ -1460,6 +1528,7 @@ export function App() {
             <div>B 类别: {selectedLink.b.category}</div>
             <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
             <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+            <div>link uid: {selectedLinkMetric?.linkUid || '-'}</div>
             <div>monitor health: {selectedLinkMetric?.health || '-'}</div>
             <div>loss: {selectedLinkMetric?.lossRate != null ? `${(selectedLinkMetric.lossRate * 100).toFixed(2)}%` : '--'}</div>
             <div>rtt/jitter: {selectedLinkMetric?.rttMs != null ? `${selectedLinkMetric.rttMs.toFixed(1)}ms` : '--'} / {selectedLinkMetric?.jitterMs != null ? `${selectedLinkMetric.jitterMs.toFixed(1)}ms` : '--'}</div>
