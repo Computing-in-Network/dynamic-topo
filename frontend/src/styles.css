@@ -194,6 +194,18 @@ body,
   color: #e7eef8;
 }
 
+.monitor-alarm-row.severity-critical {
+  border-left: 4px solid #ff5d5d;
+}
+
+.monitor-alarm-row.severity-warning {
+  border-left: 4px solid #ffd166;
+}
+
+.monitor-alarm-row.severity-info {
+  border-left: 4px solid #5bc0eb;
+}
+
 .monitor-alarm-row.active {
   border-color: rgba(125, 255, 0, 0.65);
   background: rgba(125, 255, 0, 0.14);
@@ -251,6 +263,45 @@ body,
 
 .monitor-file-input {
   display: none;
+}
+
+.monitor-action-note {
+  font-size: 11px;
+  color: #d6e8f7;
+}
+
+.coverage-wrap {
+  margin: 6px 0;
+}
+
+.coverage-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #d6e8f7;
+  margin-bottom: 4px;
+}
+
+.coverage-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(46, 204, 113, 0.22);
+  border: 1px solid rgba(46, 204, 113, 0.4);
+  overflow: hidden;
+}
+
+.coverage-bar > div {
+  height: 100%;
+  background: rgba(46, 204, 113, 0.8);
+}
+
+.coverage-bar.warn {
+  background: rgba(241, 196, 15, 0.2);
+  border-color: rgba(241, 196, 15, 0.5);
+}
+
+.coverage-bar.warn > div {
+  background: rgba(241, 196, 15, 0.85);
 }
 
 .monitor-epoch-row select,
@@ -402,6 +453,35 @@ body,
 
 .fault-footer-actions {
   margin-top: 10px;
+}
+
+.toast {
+  position: absolute;
+  z-index: 30;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35);
+}
+
+.toast.ok {
+  background: rgba(39, 174, 96, 0.22);
+  color: #d9f9e3;
+}
+
+.toast.warn {
+  background: rgba(241, 196, 15, 0.2);
+  color: #ffedb0;
+}
+
+.toast.error {
+  background: rgba(231, 76, 60, 0.22);
+  color: #ffd6d2;
 }
 
 .swatch {

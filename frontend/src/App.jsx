@@ -322,6 +322,10 @@ export function App() {
   const [collectorHealth, setCollectorHealth] = useState(null);
   const [collectorMetrics, setCollectorMetrics] = useState(null);
   const [replayMode, setReplayMode] = useState(false);
+  const [showLayerPanel, setShowLayerPanel] = useState(false);
+  const [showFaultPanel, setShowFaultPanel] = useState(false);
+  const [showFlowPanel, setShowFlowPanel] = useState(false);
+  const [toast, setToast] = useState(null);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -359,10 +363,25 @@ export function App() {
   const monitorEtagRef = useRef('');
   const topoNodeAliasRef = useRef(new Map());
   const replayFileInputRef = useRef(null);
+  const toastTimerRef = useRef(null);
+
+  function pushToast(text, level = 'ok') {
+    setToast({ text, level, id: Date.now() });
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 2200);
+  }
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
   }, [layerPrefs]);
+
+  useEffect(() => () => {
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (!ENABLE_MONITOR_MOCK) {
@@ -669,7 +688,9 @@ export function App() {
       const node = topoNodeId ? nodeStateRef.current.get(topoNodeId) : null;
       const viewer = viewerRef.current;
       if (!node || !viewer) {
-        setMonitorActionStatus(`定位失败：当前拓扑中找不到节点 ${lookup || '-'}`);
+        const msg = `定位失败：当前拓扑中找不到节点 ${lookup || '-'}`;
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
         return;
       }
       setSelected({ kind: 'node', id: node.id });
@@ -678,19 +699,24 @@ export function App() {
         duration: 0.8
       });
       setMonitorActionStatus(`已定位节点 ${node.id}`);
+      pushToast(`已定位节点 ${node.id}`, 'ok');
       return;
     }
     const link = parseScopedLink(alarm.scopeUid || alarm.scopeId);
     if (!link) {
-      setMonitorActionStatus(`定位失败：无法解析 scope (${alarm.scopeUid || alarm.scopeId || '-'})`);
+      const msg = `定位失败：无法解析 scope (${alarm.scopeUid || alarm.scopeId || '-'})`;
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
       return;
     }
     const aTopo = resolveTopoNodeId(link.a);
     const bTopo = resolveTopoNodeId(link.b);
     const ok = focusLinkByNodes(aTopo || link.a, bTopo || link.b);
-    setMonitorActionStatus(ok
+    const msg = ok
       ? `已定位链路 ${(aTopo || link.a)}<->${(bTopo || link.b)}`
-      : `定位失败：当前拓扑中找不到链路 ${link.a}<->${link.b}`);
+      : `定位失败：当前拓扑中找不到链路 ${link.a}<->${link.b}`;
+    setMonitorActionStatus(msg);
+    pushToast(msg, ok ? 'ok' : 'warn');
   }
 
   useEffect(() => {
@@ -1330,6 +1356,7 @@ export function App() {
   const scopeUidPresentCount = timelineAlarms.filter((alarm) => Boolean((alarm.scopeUid || '').trim())).length;
   const scopeUidMissingCount = Math.max(0, timelineAlarms.length - scopeUidPresentCount);
   const scopeUidCoverage = timelineAlarms.length > 0 ? (scopeUidPresentCount / timelineAlarms.length) * 100 : 0;
+  const scopeUidCoverageWarn = scopeUidCoverage < 95;
 
   function exportMonitorSnapshotJson() {
     const payload = {
@@ -1363,6 +1390,7 @@ export function App() {
     anchor.remove();
     window.URL.revokeObjectURL(url);
     setMonitorActionStatus('已导出 monitor 快照 JSON');
+    pushToast('已导出 monitor 快照 JSON', 'ok');
   }
 
   function importMonitorSnapshotJsonFile(file) {
@@ -1375,7 +1403,9 @@ export function App() {
         const parsed = JSON.parse(String(reader.result || '{}'));
         const snapshot = parsed.monitor_snapshot || parsed.monitor || null;
         if (!snapshot) {
-          setMonitorActionStatus('导入失败：文件中缺少 monitor_snapshot');
+          const msg = '导入失败：文件中缺少 monitor_snapshot';
+          setMonitorActionStatus(msg);
+          pushToast(msg, 'warn');
           return;
         }
         setMonitorSnapshot((prev) => applyMonitorSnapshot(prev, snapshot));
@@ -1386,12 +1416,17 @@ export function App() {
         setMonitorError('');
         setReplayMode(true);
         setMonitorActionStatus(`已导入回放文件：${file.name}`);
+        pushToast(`已导入回放文件：${file.name}`, 'ok');
       } catch {
-        setMonitorActionStatus('导入失败：JSON 解析错误');
+        const msg = '导入失败：JSON 解析错误';
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
       }
     };
     reader.onerror = () => {
-      setMonitorActionStatus('导入失败：文件读取错误');
+      const msg = '导入失败：文件读取错误';
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
     };
     reader.readAsText(file, 'utf-8');
   }
@@ -1458,9 +1493,12 @@ export function App() {
         <div className="layer-panel">
           <div className="layer-header">
             <span>图层控制</span>
-            <button type="button" onClick={resetLayerPrefs}>重置</button>
+            <div className="monitor-header-actions">
+              <button type="button" onClick={() => setShowLayerPanel((v) => !v)}>{showLayerPanel ? '收起' : '展开'}</button>
+              <button type="button" onClick={resetLayerPrefs}>重置</button>
+            </div>
           </div>
-          <div className="layer-grid">
+          {showLayerPanel ? <div className="layer-grid">
             <label><input type="checkbox" checked={layerPrefs.nodeLeo} onChange={() => toggleLayer('nodeLeo')} /> 卫星</label>
             <label><input type="checkbox" checked={layerPrefs.nodeAircraft} onChange={() => toggleLayer('nodeAircraft')} /> 飞机</label>
             <label><input type="checkbox" checked={layerPrefs.nodeShip} onChange={() => toggleLayer('nodeShip')} /> 舰船</label>
@@ -1470,14 +1508,17 @@ export function App() {
             <label><input type="checkbox" checked={layerPrefs.showTrails} onChange={() => toggleLayer('showTrails')} /> 轨迹</label>
             <label><input type="checkbox" checked={layerPrefs.showOrbits} onChange={() => toggleLayer('showOrbits')} /> 轨道环</label>
             <label><input type="checkbox" checked={layerPrefs.showLabels} onChange={() => toggleLayer('showLabels')} /> 标签</label>
-          </div>
+          </div> : <div className="fault-empty">已收起</div>}
         </div>
         <div className="fault-panel">
           <div className="layer-header">
             <span>故障面板</span>
-            <button type="button" onClick={() => sendControl('list_faults')}>刷新</button>
+            <div className="monitor-header-actions">
+              <button type="button" onClick={() => setShowFaultPanel((v) => !v)}>{showFaultPanel ? '收起' : '展开'}</button>
+              <button type="button" onClick={() => sendControl('list_faults')}>刷新</button>
+            </div>
           </div>
-          <div className="fault-list">
+          {showFaultPanel ? <div className="fault-list">
             {faults.length === 0 ? (
               <div className="fault-empty">当前无故障注入</div>
             ) : (
@@ -1496,10 +1537,10 @@ export function App() {
                 </div>
               ))
             )}
-          </div>
-          <div className="fault-row-actions fault-footer-actions">
+          </div> : <div className="fault-empty">已收起</div>}
+          {showFaultPanel ? <div className="fault-row-actions fault-footer-actions">
             <button type="button" onClick={() => sendControl('clear_all_faults')}>解除全部故障</button>
-          </div>
+          </div> : null}
         </div>
       </div>
       {hoverInfo ? (
@@ -1659,6 +1700,7 @@ export function App() {
                     setReplayMode(false);
                     setMonitorSourceMode('snapshot_connecting');
                     setMonitorActionStatus('已退出回放模式，恢复实时拉取');
+                    pushToast('已退出回放模式，恢复实时拉取', 'ok');
                   }}
                 >
                   退出回放
@@ -1705,10 +1747,17 @@ export function App() {
           <p>alarms: {monitorSnapshot.alarmCount}</p>
           <p>critical alarms: {monitorSnapshot.criticalAlarmCount}</p>
           <p>warning alarms: {monitorSnapshot.warningAlarmCount}</p>
-          <p>scope_uid 覆盖: {scopeUidCoverage.toFixed(1)}%</p>
-          <p>scope_uid 缺失: {scopeUidMissingCount}</p>
+          <div className="coverage-wrap">
+            <div className="coverage-head">
+              <span>scope_uid 覆盖</span>
+              <span>{scopeUidCoverage.toFixed(1)}% / 缺失 {scopeUidMissingCount}</span>
+            </div>
+            <div className={`coverage-bar ${scopeUidCoverageWarn ? 'warn' : ''}`}>
+              <div style={{ width: `${Math.max(0, Math.min(100, scopeUidCoverage))}%` }} />
+            </div>
+          </div>
           {monitorError ? <p>error: {monitorError}</p> : null}
-          {monitorActionStatus ? <p>定位反馈: {monitorActionStatus}</p> : null}
+          {monitorActionStatus ? <p className="monitor-action-note">最近操作: {monitorActionStatus}</p> : null}
           <div className="monitor-filter-row">
             <select value={alarmSeverityFilter} onChange={(e) => setAlarmSeverityFilter(e.target.value)}>
               <option value="all">severity: all</option>
@@ -1730,12 +1779,12 @@ export function App() {
               filteredTimelineAlarms.slice(0, 6).map((alarm) => (
                 <div
                   key={alarm.id}
-                  className={`monitor-alarm-row ${selectedMonitorAlarmId === alarm.id ? 'active' : ''}`}
+                  className={`monitor-alarm-row severity-${alarm.severity || 'info'} ${selectedMonitorAlarmId === alarm.id ? 'active' : ''}`}
                 >
                   <div className="monitor-alarm-main">
-                    <strong>[{alarm.severity}]</strong> {alarm.title}
+                    <strong>{alarm.title}</strong>
                   </div>
-                  <div className="monitor-alarm-sub">t: {alarm.timestamp || '-'} | scope: {alarm.scopeType}/{alarm.scopeId}</div>
+                  <div className="monitor-alarm-sub">{alarm.timestamp || '-'} | {alarm.scopeType}/{alarm.scopeId}</div>
                   <button type="button" onClick={() => focusMonitorAlarm(alarm)}>定位</button>
                 </div>
               ))
@@ -1744,9 +1793,14 @@ export function App() {
           <div className="monitor-flow-list">
             <div className="layer-header">
               <span>flow 路径</span>
-              <button type="button" onClick={() => setSelectedFlowId(null)}>清除高亮</button>
+              <div className="monitor-header-actions">
+                <button type="button" onClick={() => setShowFlowPanel((v) => !v)}>{showFlowPanel ? '收起' : '展开'}</button>
+                <button type="button" onClick={() => setSelectedFlowId(null)}>清除高亮</button>
+              </div>
             </div>
-            {Object.values(monitorSnapshot.byFlow).length === 0 ? (
+            {!showFlowPanel ? (
+              <div className="fault-empty">已收起</div>
+            ) : Object.values(monitorSnapshot.byFlow).length === 0 ? (
               <div className="fault-empty">暂无 flow 数据</div>
             ) : (
               Object.values(monitorSnapshot.byFlow).slice(0, 3).map((flow) => (
@@ -1761,6 +1815,7 @@ export function App() {
         </div>
       </div>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
+      {toast ? <div className={`toast ${toast.level}`}>{toast.text}</div> : null}
     </div>
   );
 }
