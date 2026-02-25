@@ -1325,6 +1325,43 @@ export function App() {
     const byScope = alarmScopeFilter === 'all' || alarm.scopeType === alarmScopeFilter;
     return bySeverity && byScope;
   });
+  const scopeUidPresentCount = timelineAlarms.filter((alarm) => Boolean((alarm.scopeUid || '').trim())).length;
+  const scopeUidMissingCount = Math.max(0, timelineAlarms.length - scopeUidPresentCount);
+  const scopeUidCoverage = timelineAlarms.length > 0 ? (scopeUidPresentCount / timelineAlarms.length) * 100 : 0;
+
+  function exportMonitorSnapshotJson() {
+    const payload = {
+      exported_at: new Date().toISOString(),
+      monitor_epoch: monitorEpoch,
+      monitor_source_mode: monitorSourceMode,
+      monitor_last_success_at: monitorLastSuccessAt || null,
+      monitor_failures: monitorConsecutiveFailures,
+      collector_health: collectorHealth || null,
+      collector_metrics: collectorMetrics || null,
+      alarm_filters: {
+        severity: alarmSeverityFilter,
+        scope: alarmScopeFilter
+      },
+      scope_uid_stats: {
+        total_alarms: timelineAlarms.length,
+        present: scopeUidPresentCount,
+        missing: scopeUidMissingCount,
+        coverage_percent: Number(scopeUidCoverage.toFixed(2))
+      },
+      monitor_snapshot: monitorSnapshot
+    };
+    const text = JSON.stringify(payload, null, 2);
+    const blob = new Blob([text], { type: 'application/json;charset=utf-8' });
+    const url = window.URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `monitor_snapshot_${Date.now()}.json`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.URL.revokeObjectURL(url);
+    setMonitorActionStatus('已导出 monitor 快照 JSON');
+  }
 
   return (
     <div className="app-shell">
@@ -1578,7 +1615,10 @@ export function App() {
         <div className="monitor-panel">
           <div className="layer-header">
             <span>Monitor 摘要</span>
-            <span className={`badge ${monitorHealthClass}`}>{monitorSnapshot.health}</span>
+            <div className="monitor-header-actions">
+              <span className={`badge ${monitorHealthClass}`}>{monitorSnapshot.health}</span>
+              <button type="button" onClick={exportMonitorSnapshotJson}>导出JSON</button>
+            </div>
           </div>
           <p>mode: {monitorSourceMode}</p>
           <p>failures: {monitorConsecutiveFailures}</p>
@@ -1608,6 +1648,8 @@ export function App() {
           <p>alarms: {monitorSnapshot.alarmCount}</p>
           <p>critical alarms: {monitorSnapshot.criticalAlarmCount}</p>
           <p>warning alarms: {monitorSnapshot.warningAlarmCount}</p>
+          <p>scope_uid 覆盖: {scopeUidCoverage.toFixed(1)}%</p>
+          <p>scope_uid 缺失: {scopeUidMissingCount}</p>
           {monitorError ? <p>error: {monitorError}</p> : null}
           {monitorActionStatus ? <p>定位反馈: {monitorActionStatus}</p> : null}
           <div className="monitor-filter-row">

@@ -233,6 +233,22 @@ body,
   margin: 6px 0;
 }
 
+.monitor-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.monitor-header-actions button {
+  border: 1px solid rgba(255, 255, 255, 0.34);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ecf2fb;
+  border-radius: 8px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
 .monitor-epoch-row select,
 .monitor-filter-row select {
   flex: 1;
