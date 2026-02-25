@@ -249,6 +249,10 @@ body,
   cursor: pointer;
 }
 
+.monitor-file-input {
+  display: none;
+}
+
 .monitor-epoch-row select,
 .monitor-filter-row select {
   flex: 1;

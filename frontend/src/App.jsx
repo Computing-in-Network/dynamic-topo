@@ -321,6 +321,7 @@ export function App() {
   const [alarmScopeFilter, setAlarmScopeFilter] = useState('all');
   const [collectorHealth, setCollectorHealth] = useState(null);
   const [collectorMetrics, setCollectorMetrics] = useState(null);
+  const [replayMode, setReplayMode] = useState(false);
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -357,6 +358,7 @@ export function App() {
   const monitorLastSuccessRef = useRef(0);
   const monitorEtagRef = useRef('');
   const topoNodeAliasRef = useRef(new Map());
+  const replayFileInputRef = useRef(null);
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
@@ -381,7 +383,7 @@ export function App() {
   }, [monitorMockTick]);
 
   useEffect(() => {
-    if (ENABLE_MONITOR_MOCK || !monitorClientRef.current) {
+    if (ENABLE_MONITOR_MOCK || replayMode || !monitorClientRef.current) {
       return undefined;
     }
     let disposed = false;
@@ -457,10 +459,10 @@ export function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [monitorEpoch]);
+  }, [monitorEpoch, replayMode]);
 
   useEffect(() => {
-    if (ENABLE_MONITOR_MOCK || !monitorClientRef.current) {
+    if (ENABLE_MONITOR_MOCK || replayMode || !monitorClientRef.current) {
       return undefined;
     }
     let disposed = false;
@@ -489,7 +491,7 @@ export function App() {
       disposed = true;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [replayMode]);
 
   useEffect(() => {
     const ts = Date.parse(monitorSnapshot.updatedAt || '');
@@ -1363,6 +1365,37 @@ export function App() {
     setMonitorActionStatus('已导出 monitor 快照 JSON');
   }
 
+  function importMonitorSnapshotJsonFile(file) {
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || '{}'));
+        const snapshot = parsed.monitor_snapshot || parsed.monitor || null;
+        if (!snapshot) {
+          setMonitorActionStatus('导入失败：文件中缺少 monitor_snapshot');
+          return;
+        }
+        setMonitorSnapshot((prev) => applyMonitorSnapshot(prev, snapshot));
+        if (parsed.monitor_epoch != null && Number.isFinite(Number(parsed.monitor_epoch))) {
+          setMonitorEpoch(Number(parsed.monitor_epoch));
+        }
+        setMonitorSourceMode('replay');
+        setMonitorError('');
+        setReplayMode(true);
+        setMonitorActionStatus(`已导入回放文件：${file.name}`);
+      } catch {
+        setMonitorActionStatus('导入失败：JSON 解析错误');
+      }
+    };
+    reader.onerror = () => {
+      setMonitorActionStatus('导入失败：文件读取错误');
+    };
+    reader.readAsText(file, 'utf-8');
+  }
+
   return (
     <div className="app-shell">
       <div className="hud">
@@ -1618,8 +1651,32 @@ export function App() {
             <div className="monitor-header-actions">
               <span className={`badge ${monitorHealthClass}`}>{monitorSnapshot.health}</span>
               <button type="button" onClick={exportMonitorSnapshotJson}>导出JSON</button>
+              <button type="button" onClick={() => replayFileInputRef.current?.click()}>导入回放</button>
+              {replayMode ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReplayMode(false);
+                    setMonitorSourceMode('snapshot_connecting');
+                    setMonitorActionStatus('已退出回放模式，恢复实时拉取');
+                  }}
+                >
+                  退出回放
+                </button>
+              ) : null}
             </div>
           </div>
+          <input
+            ref={replayFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="monitor-file-input"
+            onChange={(e) => {
+              const file = e.target.files && e.target.files[0];
+              importMonitorSnapshotJsonFile(file || null);
+              e.target.value = '';
+            }}
+          />
           <p>mode: {monitorSourceMode}</p>
           <p>failures: {monitorConsecutiveFailures}</p>
           <p>last success: {monitorLastSuccessAt ? new Date(monitorLastSuccessAt).toLocaleTimeString() : '-'}</p>
