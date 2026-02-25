@@ -57,6 +57,36 @@ npm run dev
 VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 ```
 
+开启 monitor mock 摘要面板（前端联调占位）：
+
+```bash
+VITE_MONITOR_MOCK=1 npm run dev
+```
+
+接入 monitor Collector 快照接口（真实联调）：
+
+```bash
+VITE_MONITOR_API_URL=http://<collector-host>:9010 \
+VITE_MONITOR_API_TOKEN=<your-token> \
+npm run dev
+```
+
+生产容器默认通过同源代理路径 `/monitor-api` 访问 Collector，
+可在需要时通过 `VITE_MONITOR_API_URL` 覆盖。
+
+可选阈值配置（JSON）：
+
+```bash
+VITE_MONITOR_THRESHOLDS='{"cpu_ratio":{"warning":0.75,"critical":0.9}}'
+```
+
+monitor 模块最小测试：
+
+```bash
+cd frontend
+npm run test:monitor
+```
+
 ## 测试
 
 ```bash
