@@ -15,6 +15,13 @@ import {
   defined,
   Viewer
 } from 'cesium';
+import {
+  applyMonitorEvent,
+  applyMonitorSnapshot,
+  createEmptyMonitorSnapshot,
+  generateMockMonitorEvents,
+  MonitorApiClient
+} from './monitor';
 
 const defaultWsUrl = (() => {
   const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -67,12 +74,44 @@ const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
 const DAMAGED_NODE_COLOR = Color.fromCssColorString('#ff595e');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 const FAULT_LINK_COLOR = Color.fromCssColorString('#ff3b30').withAlpha(0.95);
+const FLOW_HIGHLIGHT_COLOR = Color.fromCssColorString('#4cc9f0').withAlpha(0.95);
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
 const FRAME_QUEUE_MAX = 600;
 const SPEED_OPTIONS = [0.5, 1, 2];
 const ORBIT_UPDATE_INTERVAL_TICKS = 4;
+const HISTORY_MAX_POINTS = 300;
+const HISTORY_RETENTION_MS = 20 * 60 * 1000;
+const TREND_WINDOW_OPTIONS = [60, 300, 900];
+const SNAPSHOT_STALE_MS = 10_000;
+const ENABLE_MONITOR_MOCK = import.meta.env.VITE_MONITOR_MOCK === '1';
+const defaultMonitorApiUrl = '/monitor-api';
+const MONITOR_API_URL = import.meta.env.VITE_MONITOR_API_URL || defaultMonitorApiUrl;
+const MONITOR_API_TOKEN = import.meta.env.VITE_MONITOR_API_TOKEN || '';
+
+function parseScopedLink(scopeId) {
+  if (!scopeId || typeof scopeId !== 'string') {
+    return null;
+  }
+  const clean = scopeId.trim();
+  if (!clean) {
+    return null;
+  }
+  if (clean.includes('->')) {
+    const [a, b] = clean.split('->').map((part) => part.trim());
+    return a && b ? { a, b } : null;
+  }
+  if (clean.includes('|')) {
+    const [a, b] = clean.split('|').map((part) => part.trim());
+    return a && b ? { a, b } : null;
+  }
+  if (clean.includes('-')) {
+    const [a, b] = clean.split('-').map((part) => part.trim());
+    return a && b ? { a, b } : null;
+  }
+  return null;
+}
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -191,6 +230,58 @@ function edgeKey(a, b) {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
 }
 
+function appendHistoryPoint(series, point) {
+  if (point == null || Number.isNaN(point.v)) {
+    return series;
+  }
+  const next = [...series];
+  const last = next[next.length - 1];
+  if (last && last.t === point.t) {
+    next[next.length - 1] = point;
+  } else {
+    next.push(point);
+  }
+  const minTs = point.t - HISTORY_RETENTION_MS;
+  while (next.length > 0 && next[0].t < minTs) {
+    next.shift();
+  }
+  if (next.length > HISTORY_MAX_POINTS) {
+    next.shift();
+  }
+  return next;
+}
+
+function buildSparklinePath(points, width = 156, height = 36) {
+  if (!Array.isArray(points) || points.length < 2) {
+    return '';
+  }
+  const values = points.map((p) => p.v);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = Math.max(1e-6, max - min);
+  const xStep = width / Math.max(1, points.length - 1);
+  return points.map((p, idx) => {
+    const x = idx * xStep;
+    const y = height - ((p.v - min) / span) * height;
+    return `${idx === 0 ? 'M' : 'L'}${x.toFixed(2)},${y.toFixed(2)}`;
+  }).join(' ');
+}
+
+function filterSeriesByWindow(series, windowSec) {
+  if (!Array.isArray(series) || series.length === 0) {
+    return [];
+  }
+  if (!windowSec || windowSec <= 0) {
+    return series;
+  }
+  const lastTs = series[series.length - 1]?.t;
+  if (!lastTs) {
+    return series;
+  }
+  const startTs = lastTs - windowSec * 1000;
+  return series.filter((p) => p.t >= startTs);
+}
+
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
@@ -207,6 +298,20 @@ export function App() {
   const [queueDepth, setQueueDepth] = useState(0);
   const [faults, setFaults] = useState([]);
   const [controlStatus, setControlStatus] = useState('');
+  const [monitorSnapshot, setMonitorSnapshot] = useState(() => createEmptyMonitorSnapshot());
+  const [monitorMockTick, setMonitorMockTick] = useState(0);
+  const [selectedMonitorAlarmId, setSelectedMonitorAlarmId] = useState(null);
+  const [selectedFlowId, setSelectedFlowId] = useState(null);
+  const [trendWindowSec, setTrendWindowSec] = useState(300);
+  const [monitorSourceMode, setMonitorSourceMode] = useState(ENABLE_MONITOR_MOCK ? 'mock' : (MONITOR_API_URL ? 'snapshot_connecting' : 'idle'));
+  const [monitorError, setMonitorError] = useState('');
+  const [monitorActionStatus, setMonitorActionStatus] = useState('');
+  const [monitorEpoch, setMonitorEpoch] = useState(1708848000);
+  const [monitorAvailableEpochs, setMonitorAvailableEpochs] = useState([]);
+  const [monitorConsecutiveFailures, setMonitorConsecutiveFailures] = useState(0);
+  const [monitorLastSuccessAt, setMonitorLastSuccessAt] = useState(0);
+  const [alarmSeverityFilter, setAlarmSeverityFilter] = useState('all');
+  const [alarmScopeFilter, setAlarmScopeFilter] = useState('all');
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -237,10 +342,134 @@ export function App() {
   const frameQueueRef = useRef([]);
   const orbitCacheRef = useRef(new Map());
   const wsRef = useRef(null);
+  const monitorClientRef = useRef(MONITOR_API_URL ? new MonitorApiClient({ baseUrl: MONITOR_API_URL, token: MONITOR_API_TOKEN }) : null);
+  const metricHistoryRef = useRef({ nodes: new Map(), links: new Map() });
+  const monitorFailureRef = useRef(0);
+  const monitorLastSuccessRef = useRef(0);
 
   useEffect(() => {
     window.localStorage.setItem(LAYER_PREFS_KEY, JSON.stringify(layerPrefs));
   }, [layerPrefs]);
+
+  useEffect(() => {
+    if (!ENABLE_MONITOR_MOCK) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setMonitorMockTick((v) => v + 1);
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!ENABLE_MONITOR_MOCK) {
+      return;
+    }
+    const events = generateMockMonitorEvents(monitorMockTick);
+    setMonitorSnapshot((prev) => events.reduce((acc, event) => applyMonitorEvent(acc, event), prev));
+  }, [monitorMockTick]);
+
+  useEffect(() => {
+    if (ENABLE_MONITOR_MOCK || !monitorClientRef.current) {
+      return undefined;
+    }
+    let disposed = false;
+    let timer = null;
+
+    async function pullSnapshot() {
+      try {
+        const raw = await monitorClientRef.current.getSnapshot({
+          topologyEpoch: monitorEpoch
+        });
+        if (disposed) {
+          return;
+        }
+        const monitor = raw?.monitor || {};
+        setMonitorSnapshot((prev) => applyMonitorSnapshot(prev, raw));
+        setMonitorSourceMode('snapshot');
+        setMonitorError('');
+        monitorFailureRef.current = 0;
+        setMonitorConsecutiveFailures(0);
+        monitorLastSuccessRef.current = Date.now();
+        setMonitorLastSuccessAt(monitorLastSuccessRef.current);
+
+        const availableEpochs = Array.isArray(monitor.available_epochs)
+          ? monitor.available_epochs.map((v) => Number(v)).filter((v) => Number.isFinite(v))
+          : [];
+        if (availableEpochs.length > 0) {
+          setMonitorAvailableEpochs(availableEpochs);
+        }
+        if (monitor.topology_epoch != null) {
+          const serverEpoch = Number(monitor.topology_epoch);
+          if (Number.isFinite(serverEpoch) && monitorEpoch == null) {
+            setMonitorEpoch(serverEpoch);
+          }
+        }
+      } catch (err) {
+        if (disposed) {
+          return;
+        }
+        const now = Date.now();
+        setMonitorError(err?.message || 'monitor snapshot 拉取失败');
+        monitorFailureRef.current += 1;
+        setMonitorConsecutiveFailures(monitorFailureRef.current);
+        if (monitorLastSuccessRef.current > 0 && now - monitorLastSuccessRef.current <= SNAPSHOT_STALE_MS) {
+          setMonitorSourceMode('snapshot_stale');
+        } else {
+          setMonitorSourceMode('snapshot_error');
+        }
+      } finally {
+        if (!disposed) {
+          const nextDelay = monitorFailureRef.current >= 3 ? 5000 : 2000;
+          timer = window.setTimeout(pullSnapshot, nextDelay);
+        }
+      }
+    }
+
+    pullSnapshot();
+    return () => {
+      disposed = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [monitorEpoch]);
+
+  useEffect(() => {
+    const ts = Date.parse(monitorSnapshot.updatedAt || '');
+    if (Number.isNaN(ts)) {
+      return;
+    }
+    const history = metricHistoryRef.current;
+    for (const nodeMetric of Object.values(monitorSnapshot.byNode)) {
+      const nodeId = nodeMetric.nodeId;
+      const prev = history.nodes.get(nodeId) || {
+        cpu: [],
+        mem: [],
+        tx: [],
+        rx: []
+      };
+      history.nodes.set(nodeId, {
+        cpu: appendHistoryPoint(prev.cpu, { t: ts, v: nodeMetric.cpuRatio ?? NaN }),
+        mem: appendHistoryPoint(prev.mem, { t: ts, v: nodeMetric.memRatio ?? NaN }),
+        tx: appendHistoryPoint(prev.tx, { t: ts, v: nodeMetric.txBps ?? NaN }),
+        rx: appendHistoryPoint(prev.rx, { t: ts, v: nodeMetric.rxBps ?? NaN })
+      });
+    }
+    for (const linkMetric of Object.values(monitorSnapshot.byLink)) {
+      const linkId = linkMetric.linkId;
+      const prev = history.links.get(linkId) || {
+        loss: [],
+        rtt: [],
+        jitter: []
+      };
+      history.links.set(linkId, {
+        loss: appendHistoryPoint(prev.loss, { t: ts, v: linkMetric.lossRate ?? NaN }),
+        rtt: appendHistoryPoint(prev.rtt, { t: ts, v: linkMetric.rttMs ?? NaN }),
+        jitter: appendHistoryPoint(prev.jitter, { t: ts, v: linkMetric.jitterMs ?? NaN })
+      });
+    }
+  }, [monitorSnapshot]);
 
   function toggleLayer(key) {
     setLayerPrefs((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -327,6 +556,67 @@ export function App() {
       ),
       duration: 0.8
     });
+  }
+
+  function focusLinkByNodes(a, b) {
+    const viewer = viewerRef.current;
+    if (!viewer || !a || !b) {
+      return false;
+    }
+    const aNode = nodeStateRef.current.get(a);
+    const bNode = nodeStateRef.current.get(b);
+    if (!aNode || !bNode) {
+      return false;
+    }
+    const linkIdAB = `${a}-${b}`;
+    const linkIdBA = `${b}-${a}`;
+    const linkIdFault = `fault-${edgeKey(a, b)}`;
+    const linkId = linkStateRef.current.has(linkIdAB)
+      ? linkIdAB
+      : (linkStateRef.current.has(linkIdBA) ? linkIdBA : linkIdFault);
+    if (linkStateRef.current.has(linkId)) {
+      setSelected({ kind: 'link', id: linkId });
+    }
+    viewer.camera.flyTo({
+      destination: Cartesian3.fromDegrees(
+        (aNode.lon + bNode.lon) / 2.0,
+        (aNode.lat + bNode.lat) / 2.0,
+        Math.max(aNode.alt_m, bNode.alt_m) + 1_200_000
+      ),
+      duration: 0.8
+    });
+    return true;
+  }
+
+  function focusMonitorAlarm(alarm) {
+    if (!alarm) {
+      return;
+    }
+    setSelectedMonitorAlarmId(alarm.id);
+    if (alarm.scopeType === 'node') {
+      const node = nodeStateRef.current.get(alarm.scopeId);
+      const viewer = viewerRef.current;
+      if (!node || !viewer) {
+        setMonitorActionStatus(`定位失败：当前拓扑中找不到节点 ${alarm.scopeId || '-'}`);
+        return;
+      }
+      setSelected({ kind: 'node', id: node.id });
+      viewer.camera.flyTo({
+        destination: Cartesian3.fromDegrees(node.lon, node.lat, node.alt_m + 1_200_000),
+        duration: 0.8
+      });
+      setMonitorActionStatus(`已定位节点 ${node.id}`);
+      return;
+    }
+    const link = parseScopedLink(alarm.scopeId);
+    if (!link) {
+      setMonitorActionStatus(`定位失败：无法解析 scope_id (${alarm.scopeId || '-'})`);
+      return;
+    }
+    const ok = focusLinkByNodes(link.a, link.b);
+    setMonitorActionStatus(ok
+      ? `已定位链路 ${link.a}<->${link.b}`
+      : `定位失败：当前拓扑中找不到链路 ${link.a}<->${link.b}`);
   }
 
   useEffect(() => {
@@ -682,6 +972,7 @@ export function App() {
       }
       const positions = [pa, pb];
       const selectedLink = selected?.kind === 'link' && selected.id === linkId;
+      const inSelectedFlow = flowEdgeKeys.has(edgeKey(edge.a, edge.b));
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
@@ -704,6 +995,8 @@ export function App() {
                   color: FAULT_LINK_COLOR,
                   dashLength: 12
                 })
+              : inSelectedFlow
+                ? FLOW_HIGHLIGHT_COLOR
               : style.color
           }
         });
@@ -712,19 +1005,20 @@ export function App() {
           width: style.width,
           selected: selectedLink,
           kind: linkKind,
-          fault: linkFaulted
+          fault: linkFaulted,
+          flow: inSelectedFlow
         });
       } else {
         lineEntity.polyline.positions = positions;
       }
       const visual = linkVisualStateRef.current.get(linkId);
       const baseWidth = linkFaulted ? Math.max(style.width, 2.8) : style.width;
-      const expectedWidth = selectedLink ? baseWidth + 1.6 : baseWidth;
+      const expectedWidth = selectedLink ? baseWidth + 1.6 : (inSelectedFlow ? baseWidth + 1.0 : baseWidth);
       const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
       if (widthChanged) {
         lineEntity.polyline.width = expectedWidth;
       }
-      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind || visual.fault !== linkFaulted;
+      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind || visual.fault !== linkFaulted || visual.flow !== inSelectedFlow;
       if (materialChanged) {
         if (selectedLink) {
           lineEntity.polyline.material = SELECTED_LINK_COLOR;
@@ -733,6 +1027,8 @@ export function App() {
             color: FAULT_LINK_COLOR,
             dashLength: 12
           });
+        } else if (inSelectedFlow) {
+          lineEntity.polyline.material = FLOW_HIGHLIGHT_COLOR;
         } else {
           lineEntity.polyline.material = style.color;
         }
@@ -742,7 +1038,8 @@ export function App() {
         width: expectedWidth,
         selected: selectedLink,
         kind: linkKind,
-        fault: linkFaulted
+        fault: linkFaulted,
+        flow: inSelectedFlow
       });
     }
 
@@ -847,10 +1144,51 @@ export function App() {
         setSelected(null);
       }
     }
-  }, [frame, layerPrefs, selected, faults]);
+  }, [frame, layerPrefs, selected, faults, selectedFlowId, monitorSnapshot.byFlow]);
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
+  const selectedFlow = selectedFlowId ? monitorSnapshot.byFlow[selectedFlowId] : null;
+  const flowEdgeKeys = new Set();
+  if (selectedFlow?.path?.length > 1) {
+    for (let i = 0; i < selectedFlow.path.length - 1; i += 1) {
+      flowEdgeKeys.add(edgeKey(selectedFlow.path[i], selectedFlow.path[i + 1]));
+    }
+  }
+  const selectedNodeMetric = selectedNode ? monitorSnapshot.byNode[selectedNode.id] : null;
+  const selectedLinkMetric = selectedLink
+    ? Object.values(monitorSnapshot.byLink).find((item) => {
+      if (!item || !item.srcNodeId || !item.dstNodeId) {
+        return false;
+      }
+      const src = item.srcNodeId;
+      const dst = item.dstNodeId;
+      return (
+        (src === selectedLink.a.id && dst === selectedLink.b.id) ||
+          (src === selectedLink.b.id && dst === selectedLink.a.id)
+      );
+    }) || null
+    : null;
+  const selectedNodeHistory = selectedNode ? metricHistoryRef.current.nodes.get(selectedNode.id) : null;
+  const selectedLinkHistory = selectedLinkMetric ? metricHistoryRef.current.links.get(selectedLinkMetric.linkId) : null;
+  const selectedNodeHistoryView = {
+    cpu: filterSeriesByWindow(selectedNodeHistory?.cpu || [], trendWindowSec),
+    mem: filterSeriesByWindow(selectedNodeHistory?.mem || [], trendWindowSec),
+    tx: filterSeriesByWindow(selectedNodeHistory?.tx || [], trendWindowSec),
+    rx: filterSeriesByWindow(selectedNodeHistory?.rx || [], trendWindowSec)
+  };
+  const selectedLinkHistoryView = {
+    loss: filterSeriesByWindow(selectedLinkHistory?.loss || [], trendWindowSec),
+    rtt: filterSeriesByWindow(selectedLinkHistory?.rtt || [], trendWindowSec),
+    jitter: filterSeriesByWindow(selectedLinkHistory?.jitter || [], trendWindowSec)
+  };
+  const monitorHealthClass = monitorSnapshot.health === 'critical'
+    ? 'error'
+    : monitorSnapshot.health === 'warning'
+      ? 'warn'
+      : monitorSnapshot.health === 'unknown'
+        ? 'warn'
+        : 'ok';
   const alerts = [];
   if (!connected) {
     alerts.push({ level: 'error', text: 'WebSocket 已断开' });
@@ -863,6 +1201,16 @@ export function App() {
   if (connected && runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN) {
     alerts.push({ level: 'warn', text: `帧率偏低：${runtimeHealth.ingestFps.toFixed(2)} fps` });
   }
+  const timelineAlarms = [...monitorSnapshot.topAlarms].sort((a, b) => {
+    const ta = Date.parse(a.timestamp || '');
+    const tb = Date.parse(b.timestamp || '');
+    return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+  });
+  const filteredTimelineAlarms = timelineAlarms.filter((alarm) => {
+    const bySeverity = alarmSeverityFilter === 'all' || alarm.severity === alarmSeverityFilter;
+    const byScope = alarmScopeFilter === 'all' || alarm.scopeType === alarmScopeFilter;
+    return bySeverity && byScope;
+  });
 
   return (
     <div className="app-shell">
@@ -986,12 +1334,24 @@ export function App() {
           <div>alt: {hoverInfo.node.alt_m.toFixed(0)} m</div>
         </div>
       ) : null}
-      <aside className={`detail-panel ${selected ? 'show' : ''}`}>
+      <aside className={`detail-panel ${(selected || selectedFlow) ? 'show' : ''}`}>
         <div className="detail-header">
           <strong>详情侧栏</strong>
-          <button type="button" onClick={() => setSelected(null)}>关闭</button>
+          <button type="button" onClick={() => { setSelected(null); setSelectedFlowId(null); }}>关闭</button>
         </div>
-        {!selectedNode && !selectedLink ? (
+        <div className="trend-window-switch">
+          {TREND_WINDOW_OPTIONS.map((sec) => (
+            <button
+              key={`trend-window-${sec}`}
+              type="button"
+              className={trendWindowSec === sec ? 'active' : ''}
+              onClick={() => setTrendWindowSec(sec)}
+            >
+              {Math.round(sec / 60)}m
+            </button>
+          ))}
+        </div>
+        {!selectedNode && !selectedLink && !selectedFlow ? (
           <div className="detail-empty">点击节点或链路查看详情</div>
         ) : null}
         {selectedNode ? (
@@ -1004,6 +1364,37 @@ export function App() {
             <div>经度: {selectedNode.lon.toFixed(3)}</div>
             <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
             <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+            <div>monitor health: {selectedNodeMetric?.health || '-'}</div>
+            <div>cpu: {selectedNodeMetric?.cpuRatio != null ? `${(selectedNodeMetric.cpuRatio * 100).toFixed(1)}%` : '--'}</div>
+            <div>mem: {selectedNodeMetric?.memRatio != null ? `${(selectedNodeMetric.memRatio * 100).toFixed(1)}%` : '--'}</div>
+            <div>tx/rx: {selectedNodeMetric?.txBps != null ? selectedNodeMetric.txBps.toFixed(1) : '--'} / {selectedNodeMetric?.rxBps != null ? selectedNodeMetric.rxBps.toFixed(1) : '--'} bps</div>
+            <div className="trend-group">
+              <div className="trend-title">趋势窗口（{Math.round(trendWindowSec / 60)} 分钟）</div>
+              <div className="trend-row">
+                <span>cpu</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedNodeHistoryView.cpu)} />
+                </svg>
+              </div>
+              <div className="trend-row">
+                <span>mem</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedNodeHistoryView.mem)} />
+                </svg>
+              </div>
+              <div className="trend-row">
+                <span>tx</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedNodeHistoryView.tx)} />
+                </svg>
+              </div>
+              <div className="trend-row">
+                <span>rx</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedNodeHistoryView.rx)} />
+                </svg>
+              </div>
+            </div>
             <div className="detail-actions">
               <button type="button" onClick={() => sendControl('inject_node_fault', { node_id: selectedNode.id })}>
                 注入节点故障
@@ -1021,6 +1412,30 @@ export function App() {
             <div>B 类别: {selectedLink.b.category}</div>
             <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
             <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+            <div>monitor health: {selectedLinkMetric?.health || '-'}</div>
+            <div>loss: {selectedLinkMetric?.lossRate != null ? `${(selectedLinkMetric.lossRate * 100).toFixed(2)}%` : '--'}</div>
+            <div>rtt/jitter: {selectedLinkMetric?.rttMs != null ? `${selectedLinkMetric.rttMs.toFixed(1)}ms` : '--'} / {selectedLinkMetric?.jitterMs != null ? `${selectedLinkMetric.jitterMs.toFixed(1)}ms` : '--'}</div>
+            <div className="trend-group">
+              <div className="trend-title">趋势窗口（{Math.round(trendWindowSec / 60)} 分钟）</div>
+              <div className="trend-row">
+                <span>loss</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedLinkHistoryView.loss)} />
+                </svg>
+              </div>
+              <div className="trend-row">
+                <span>rtt</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedLinkHistoryView.rtt)} />
+                </svg>
+              </div>
+              <div className="trend-row">
+                <span>jitter</span>
+                <svg viewBox="0 0 156 36" className="sparkline">
+                  <path d={buildSparklinePath(selectedLinkHistoryView.jitter)} />
+                </svg>
+              </div>
+            </div>
             <div className="detail-actions">
               <button
                 type="button"
@@ -1031,7 +1446,101 @@ export function App() {
             </div>
           </div>
         ) : null}
+        {selectedFlow ? (
+          <div className="detail-block">
+            <div className="detail-title">流 {selectedFlow.flowId}</div>
+            <div>src: {selectedFlow.srcNodeId || '-'}</div>
+            <div>dst: {selectedFlow.dstNodeId || '-'}</div>
+            <div>bps: {selectedFlow.bps != null ? selectedFlow.bps.toFixed(1) : '--'}</div>
+            <div>priority: {selectedFlow.priority || '-'}</div>
+            <div>path: {(selectedFlow.path || []).join(' -> ') || '-'}</div>
+          </div>
+        ) : null}
       </aside>
+      <div className="monitor-dock">
+        <div className="monitor-panel">
+          <div className="layer-header">
+            <span>Monitor 摘要</span>
+            <span className={`badge ${monitorHealthClass}`}>{monitorSnapshot.health}</span>
+          </div>
+          <p>mode: {monitorSourceMode}</p>
+          <p>failures: {monitorConsecutiveFailures}</p>
+          <p>last success: {monitorLastSuccessAt ? new Date(monitorLastSuccessAt).toLocaleTimeString() : '-'}</p>
+          <div className="monitor-epoch-row">
+            <span>epoch</span>
+            <select
+              value={monitorEpoch ?? ''}
+              onChange={(e) => setMonitorEpoch(e.target.value ? Number(e.target.value) : null)}
+            >
+              {monitorAvailableEpochs.length === 0 ? (
+                <option value={monitorEpoch ?? ''}>{monitorEpoch ?? '-'}</option>
+              ) : (
+                monitorAvailableEpochs.map((epoch) => (
+                  <option key={`epoch-${epoch}`} value={epoch}>{epoch}</option>
+                ))
+              )}
+            </select>
+          </div>
+          <p>updated: {monitorSnapshot.updatedAt || '-'}</p>
+          <p>nodes: {monitorSnapshot.nodeCount}</p>
+          <p>links: {monitorSnapshot.linkCount}</p>
+          <p>flows: {monitorSnapshot.flowCount}</p>
+          <p>alarms: {monitorSnapshot.alarmCount}</p>
+          <p>critical alarms: {monitorSnapshot.criticalAlarmCount}</p>
+          <p>warning alarms: {monitorSnapshot.warningAlarmCount}</p>
+          {monitorError ? <p>error: {monitorError}</p> : null}
+          {monitorActionStatus ? <p>定位反馈: {monitorActionStatus}</p> : null}
+          <div className="monitor-filter-row">
+            <select value={alarmSeverityFilter} onChange={(e) => setAlarmSeverityFilter(e.target.value)}>
+              <option value="all">severity: all</option>
+              <option value="critical">critical</option>
+              <option value="warning">warning</option>
+              <option value="info">info</option>
+            </select>
+            <select value={alarmScopeFilter} onChange={(e) => setAlarmScopeFilter(e.target.value)}>
+              <option value="all">scope: all</option>
+              <option value="node">node</option>
+              <option value="link">link</option>
+              <option value="path">path</option>
+            </select>
+          </div>
+          <div className="monitor-alarm-list">
+            {filteredTimelineAlarms.length === 0 ? (
+              <div className="fault-empty">暂无 monitor 告警</div>
+            ) : (
+              filteredTimelineAlarms.slice(0, 6).map((alarm) => (
+                <div
+                  key={alarm.id}
+                  className={`monitor-alarm-row ${selectedMonitorAlarmId === alarm.id ? 'active' : ''}`}
+                >
+                  <div className="monitor-alarm-main">
+                    <strong>[{alarm.severity}]</strong> {alarm.title}
+                  </div>
+                  <div className="monitor-alarm-sub">t: {alarm.timestamp || '-'} | scope: {alarm.scopeType}/{alarm.scopeId}</div>
+                  <button type="button" onClick={() => focusMonitorAlarm(alarm)}>定位</button>
+                </div>
+              ))
+            )}
+          </div>
+          <div className="monitor-flow-list">
+            <div className="layer-header">
+              <span>flow 路径</span>
+              <button type="button" onClick={() => setSelectedFlowId(null)}>清除高亮</button>
+            </div>
+            {Object.values(monitorSnapshot.byFlow).length === 0 ? (
+              <div className="fault-empty">暂无 flow 数据</div>
+            ) : (
+              Object.values(monitorSnapshot.byFlow).slice(0, 3).map((flow) => (
+                <div key={flow.flowId} className={`monitor-flow-row ${selectedFlowId === flow.flowId ? 'active' : ''}`}>
+                  <div><strong>{flow.flowId}</strong> {flow.bps != null ? `${flow.bps.toFixed(1)} bps` : ''}</div>
+                  <div className="monitor-alarm-sub">{(flow.path || []).join(' -> ') || '-'}</div>
+                  <button type="button" onClick={() => setSelectedFlowId(flow.flowId)}>高亮路径</button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
       <div ref={containerRef} style={{ width: '100%', height: '100%' }} />
     </div>
   );
