@@ -27,6 +27,91 @@ function maxLevel(levels) {
   return 'unknown';
 }
 
+function pickFirstNumber(...candidates) {
+  for (const value of candidates) {
+    if (value == null) {
+      continue;
+    }
+    const n = Number(value);
+    if (Number.isFinite(n)) {
+      return n;
+    }
+  }
+  return null;
+}
+
+function normalizeRatio(...candidates) {
+  const value = pickFirstNumber(...candidates);
+  if (value == null) {
+    return null;
+  }
+  if (value >= 0 && value <= 1) {
+    return value;
+  }
+  if (value > 1 && value <= 100) {
+    return value / 100;
+  }
+  return null;
+}
+
+function normalizeNodeMetric(event, threshold) {
+  const nodeId = event.node_id || event.node_uid || event.docker_name || '';
+  if (!nodeId) {
+    return null;
+  }
+  const cpuRatio = normalizeRatio(event.cpu_ratio, event.cpu_percent, event.cpu_usage, event.cpu);
+  const memRatio = normalizeRatio(event.mem_ratio, event.memory_ratio, event.mem_percent, event.memory_percent, event.mem_usage, event.mem);
+  const txBps = pickFirstNumber(event.tx_bps, event.tx_rate_bps, event.tx_rate, event.tx_bytes_per_sec);
+  const rxBps = pickFirstNumber(event.rx_bps, event.rx_rate_bps, event.rx_rate, event.rx_bytes_per_sec);
+  const levels = [
+    metricLevel(cpuRatio, threshold.cpu_ratio),
+    metricLevel(memRatio, threshold.mem_ratio)
+  ];
+  return {
+    nodeId,
+    nodeUid: event.node_uid || event.docker_name || nodeId,
+    topoNodeId: event.topo_node_id || nodeId,
+    dockerName: event.docker_name || '',
+    dockerIp: event.docker_ip || event.ip || '',
+    cpuRatio,
+    memRatio,
+    txBps,
+    rxBps,
+    status: event.status || 'UNKNOWN',
+    health: maxLevel(levels)
+  };
+}
+
+function normalizeLinkMetric(event, threshold) {
+  const srcNodeId = event.src_node_id || event.src_node_uid || event.src || event.source || '';
+  const dstNodeId = event.dst_node_id || event.dst_node_uid || event.dst || event.target || '';
+  const linkId = event.link_id || event.link_uid || (srcNodeId && dstNodeId ? `${srcNodeId}<->${dstNodeId}` : '');
+  if (!linkId) {
+    return null;
+  }
+  const lossRate = normalizeRatio(event.loss_rate, event.loss_ratio, event.packet_loss_rate, event.loss_percent);
+  const rttMs = pickFirstNumber(event.rtt_ms, event.latency_ms, event.delay_ms);
+  const jitterMs = pickFirstNumber(event.jitter_ms, event.jitter);
+  const levels = [
+    metricLevel(lossRate, threshold.loss_rate),
+    metricLevel(rttMs, threshold.rtt_ms),
+    metricLevel(jitterMs, threshold.jitter_ms)
+  ];
+  return {
+    linkId,
+    linkUid: event.link_uid || linkId,
+    srcNodeId,
+    dstNodeId,
+    srcNodeUid: event.src_node_uid || srcNodeId,
+    dstNodeUid: event.dst_node_uid || dstNodeId,
+    state: event.state || 'UNKNOWN',
+    lossRate,
+    rttMs,
+    jitterMs,
+    health: maxLevel(levels)
+  };
+}
+
 export function createEmptyMonitorSnapshot() {
   return {
     updatedAt: null,
@@ -82,50 +167,19 @@ export function applyMonitorEvent(snapshot, inputEvent, options = {}) {
   next.updatedAt = event.timestamp || new Date().toISOString();
 
   if (event.kind === MONITOR_EVENT_KIND.NODE_METRIC) {
-    if (!event.node_id) {
+    const normalized = normalizeNodeMetric(event, threshold);
+    if (!normalized) {
       return snapshot;
     }
-    const levels = [
-      metricLevel(event.cpu_ratio, threshold.cpu_ratio),
-      metricLevel(event.mem_ratio, threshold.mem_ratio)
-    ];
-    next.byNode[event.node_id] = {
-      nodeId: event.node_id,
-      nodeUid: event.node_uid || event.docker_name || event.node_id,
-      topoNodeId: event.topo_node_id || event.node_id,
-      dockerName: event.docker_name || '',
-      dockerIp: event.docker_ip || '',
-      cpuRatio: event.cpu_ratio ?? null,
-      memRatio: event.mem_ratio ?? null,
-      txBps: event.tx_bps ?? null,
-      rxBps: event.rx_bps ?? null,
-      status: event.status || 'UNKNOWN',
-      health: maxLevel(levels)
-    };
+    next.byNode[normalized.nodeId] = normalized;
   }
 
   if (event.kind === MONITOR_EVENT_KIND.LINK_METRIC) {
-    if (!event.link_id) {
+    const normalized = normalizeLinkMetric(event, threshold);
+    if (!normalized) {
       return snapshot;
     }
-    const levels = [
-      metricLevel(event.loss_rate, threshold.loss_rate),
-      metricLevel(event.rtt_ms, threshold.rtt_ms),
-      metricLevel(event.jitter_ms, threshold.jitter_ms)
-    ];
-    next.byLink[event.link_id] = {
-      linkId: event.link_id,
-      linkUid: event.link_uid || event.link_id,
-      srcNodeId: event.src_node_id || '',
-      dstNodeId: event.dst_node_id || '',
-      srcNodeUid: event.src_node_uid || event.src_node_id || '',
-      dstNodeUid: event.dst_node_uid || event.dst_node_id || '',
-      state: event.state || 'UNKNOWN',
-      lossRate: event.loss_rate ?? null,
-      rttMs: event.rtt_ms ?? null,
-      jitterMs: event.jitter_ms ?? null,
-      health: maxLevel(levels)
-    };
+    next.byLink[normalized.linkId] = normalized;
   }
 
   if (event.kind === MONITOR_EVENT_KIND.FLOW) {
@@ -190,48 +244,25 @@ export function applyMonitorSnapshot(snapshot, rawSnapshot, options = {}) {
   const linkEntries = Array.isArray(links) ? links : Object.values(links);
 
   for (const item of nodeEntries) {
-    if (!item || !item.node_id) {
+    if (!item) {
       continue;
     }
-    next.byNode[item.node_id] = {
-      nodeId: item.node_id,
-      nodeUid: item.node_uid || item.docker_name || item.node_id,
-      topoNodeId: item.topo_node_id || item.node_id,
-      dockerName: item.docker_name || '',
-      dockerIp: item.docker_ip || '',
-      cpuRatio: item.cpu_ratio ?? null,
-      memRatio: item.mem_ratio ?? null,
-      txBps: item.tx_bps ?? null,
-      rxBps: item.rx_bps ?? null,
-      status: item.status || 'UNKNOWN',
-      health: maxLevel([
-        metricLevel(item.cpu_ratio, threshold.cpu_ratio),
-        metricLevel(item.mem_ratio, threshold.mem_ratio)
-      ])
-    };
+    const normalized = normalizeNodeMetric(item, threshold);
+    if (!normalized) {
+      continue;
+    }
+    next.byNode[normalized.nodeId] = normalized;
   }
 
   for (const item of linkEntries) {
-    if (!item || !item.link_id) {
+    if (!item) {
       continue;
     }
-    next.byLink[item.link_id] = {
-      linkId: item.link_id,
-      linkUid: item.link_uid || item.link_id,
-      srcNodeId: item.src_node_id || '',
-      dstNodeId: item.dst_node_id || '',
-      srcNodeUid: item.src_node_uid || item.src_node_id || '',
-      dstNodeUid: item.dst_node_uid || item.dst_node_id || '',
-      state: item.state || 'UNKNOWN',
-      lossRate: item.loss_rate ?? null,
-      rttMs: item.rtt_ms ?? null,
-      jitterMs: item.jitter_ms ?? null,
-      health: maxLevel([
-        metricLevel(item.loss_rate, threshold.loss_rate),
-        metricLevel(item.rtt_ms, threshold.rtt_ms),
-        metricLevel(item.jitter_ms, threshold.jitter_ms)
-      ])
-    };
+    const normalized = normalizeLinkMetric(item, threshold);
+    if (!normalized) {
+      continue;
+    }
+    next.byLink[normalized.linkId] = normalized;
   }
 
   for (const alarm of alarms) {

@@ -289,6 +289,22 @@ function filterSeriesByWindow(series, windowSec) {
   return series.filter((p) => p.t >= startTs);
 }
 
+function getAnalysisResult(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return null;
+  }
+  if (payload.result && typeof payload.result === 'object') {
+    return payload.result;
+  }
+  if (payload.data && typeof payload.data === 'object') {
+    if (payload.data.result && typeof payload.data.result === 'object') {
+      return payload.data.result;
+    }
+    return payload.data;
+  }
+  return null;
+}
+
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
@@ -326,6 +342,7 @@ export function App() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [analysisSupported, setAnalysisSupported] = useState(true);
+  const [analysisSummary, setAnalysisSummary] = useState(null);
   const [replayMode, setReplayMode] = useState(false);
   const [showLayerPanel, setShowLayerPanel] = useState(false);
   const [showFaultPanel, setShowFaultPanel] = useState(false);
@@ -806,6 +823,13 @@ export function App() {
         pushToast(msg, 'warn');
         return;
       }
+      setAnalysisSummary({
+        src,
+        dst,
+        links: links.length,
+        metrics: Object.keys(metrics).length,
+        alarmNodes: alarmNodes.length
+      });
 
       const [pathResp, spreadResp] = await Promise.all([
         monitorClientRef.current.queryPathAnalysis({
@@ -827,8 +851,25 @@ export function App() {
         })
       ]);
 
-      setPathAnalysis(pathResp?.result || null);
-      setFaultSpread(spreadResp?.result || null);
+      const pathResult = getAnalysisResult(pathResp);
+      const spreadResult = getAnalysisResult(spreadResp);
+      const pathCount = Array.isArray(pathResult?.paths) ? pathResult.paths.length : 0;
+      const impactedCount = Array.isArray(spreadResult?.impacted_nodes) ? spreadResult.impacted_nodes.length : 0;
+      if (!pathResult && !spreadResult) {
+        const msg = '高级分析返回空结果：后端未返回 result/data';
+        setAnalysisError(msg);
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
+      } else if (pathCount === 0 && impactedCount === 0) {
+        const msg = '高级分析已调用，但返回空集合（paths=0, impacted_nodes=0）';
+        setAnalysisError(msg);
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
+      } else {
+        setAnalysisError('');
+      }
+      setPathAnalysis(pathResult);
+      setFaultSpread(spreadResult);
       setMonitorActionStatus('已刷新路径分析与故障传播结果');
       pushToast('高级分析已更新', 'ok');
       setAnalysisSupported(true);
@@ -1483,6 +1524,12 @@ export function App() {
   const scopeUidMissingCount = Math.max(0, timelineAlarms.length - scopeUidPresentCount);
   const scopeUidCoverage = timelineAlarms.length > 0 ? (scopeUidPresentCount / timelineAlarms.length) * 100 : 0;
   const scopeUidCoverageWarn = scopeUidCoverage < 95;
+  const nodeMetricList = Object.values(monitorSnapshot.byNode);
+  const nodeCpuPresentCount = nodeMetricList.filter((item) => item.cpuRatio != null).length;
+  const nodeMemPresentCount = nodeMetricList.filter((item) => item.memRatio != null).length;
+  const nodeCpuCoverage = nodeMetricList.length > 0 ? (nodeCpuPresentCount / nodeMetricList.length) * 100 : 0;
+  const nodeMemCoverage = nodeMetricList.length > 0 ? (nodeMemPresentCount / nodeMetricList.length) * 100 : 0;
+  const nodeMetricCoverageWarn = nodeMetricList.length > 0 && (nodeCpuCoverage < 80 || nodeMemCoverage < 80);
 
   function exportMonitorSnapshotJson() {
     const payload = {
@@ -1882,6 +1929,15 @@ export function App() {
               <div style={{ width: `${Math.max(0, Math.min(100, scopeUidCoverage))}%` }} />
             </div>
           </div>
+          <div className="coverage-wrap">
+            <div className="coverage-head">
+              <span>node 指标覆盖</span>
+              <span>cpu {nodeCpuCoverage.toFixed(1)}% / mem {nodeMemCoverage.toFixed(1)}%</span>
+            </div>
+            <div className={`coverage-bar ${nodeMetricCoverageWarn ? 'warn' : ''}`}>
+              <div style={{ width: `${Math.max(0, Math.min(100, Math.min(nodeCpuCoverage, nodeMemCoverage)))}%` }} />
+            </div>
+          </div>
           {monitorError ? <p>error: {monitorError}</p> : null}
           {monitorActionStatus ? <p className="monitor-action-note">最近操作: {monitorActionStatus}</p> : null}
           <div className="monitor-filter-row">
@@ -1947,11 +2003,17 @@ export function App() {
               </div>
             </div>
             {analysisError ? <div className="analysis-error">{analysisError}</div> : null}
+            {analysisSummary ? (
+              <div className="analysis-block">
+                <div><strong>Request</strong>: {analysisSummary.src} -&gt; {analysisSummary.dst}</div>
+                <div>links: {analysisSummary.links}, metrics: {analysisSummary.metrics}, alarm_nodes: {analysisSummary.alarmNodes}</div>
+              </div>
+            ) : null}
             {pathAnalysis ? (
               <div className="analysis-block">
                 <div><strong>Path</strong>: {pathAnalysis.src || '-'} -&gt; {pathAnalysis.dst || '-'}</div>
                 <div>TopN: {pathAnalysis.top_n ?? '-'}, candidates: {pathAnalysis.total_candidates ?? '-'}</div>
-                <div>Best score: {pathAnalysis.paths?.[0]?.score ?? '-'}</div>
+                <div>paths: {pathAnalysis.paths?.length ?? 0}, best score: {pathAnalysis.paths?.[0]?.score ?? '-'}</div>
               </div>
             ) : null}
             {faultSpread ? (

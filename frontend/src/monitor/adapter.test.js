@@ -61,3 +61,45 @@ test('applyMonitorSnapshot parses nodes links and alarms', () => {
   assert.equal(next.warningAlarmCount, 1);
 });
 
+test('applyMonitorSnapshot supports alternate node metric fields', () => {
+  const next = applyMonitorSnapshot(createEmptyMonitorSnapshot(), {
+    monitor: {
+      nodes: [
+        {
+          node_uid: 'alpha',
+          docker_name: 'alpha',
+          cpu_percent: 35,
+          memory_percent: 72,
+          tx_rate: 128000,
+          rx_rate: 64000
+        }
+      ]
+    }
+  });
+  assert.equal(next.nodeCount, 1);
+  assert.equal(next.byNode.alpha.cpuRatio, 0.35);
+  assert.equal(next.byNode.alpha.memRatio, 0.72);
+  assert.equal(next.byNode.alpha.txBps, 128000);
+  assert.equal(next.byNode.alpha.rxBps, 64000);
+});
+
+test('applyMonitorSnapshot supports alternate link metric fields', () => {
+  const next = applyMonitorSnapshot(createEmptyMonitorSnapshot(), {
+    monitor: {
+      links: [
+        {
+          link_uid: 'alpha<->bravo',
+          src_node_uid: 'alpha',
+          dst_node_uid: 'bravo',
+          latency_ms: 21,
+          loss_percent: 2,
+          jitter: 3.4
+        }
+      ]
+    }
+  });
+  assert.equal(next.linkCount, 1);
+  assert.equal(next.byLink['alpha<->bravo'].rttMs, 21);
+  assert.equal(next.byLink['alpha<->bravo'].lossRate, 0.02);
+  assert.equal(next.byLink['alpha<->bravo'].jitterMs, 3.4);
+});
