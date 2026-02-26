@@ -87,7 +87,7 @@ export class MonitorApiClient {
       params.set('topology_epoch', String(options.topologyEpoch));
     }
     const query = params.toString();
-    const path = `/api/v1/monitor/snapshot${query ? `?${query}` : ''}`;
+    const path = `/api/v1/bff/snapshot${query ? `?${query}` : ''}`;
     const token = options.token || this.token;
     const headers = {
       ...(token ? { 'x-api-token': token } : {})
@@ -137,7 +137,71 @@ export class MonitorApiClient {
   }
 
   async getMetrics(options = {}) {
-    const { data } = await this._request('/metrics', {
+    const token = options.token || this.token;
+    try {
+      const { data } = await this._request('/api/v1/ops/slo', {
+        method: 'GET',
+        token
+      });
+      return data;
+    } catch (err) {
+      if (![404, 405, 501].includes(err?.status)) {
+        throw err;
+      }
+      const { data } = await this._request('/metrics', {
+        method: 'GET',
+        token
+      });
+      return data;
+    }
+  }
+
+  async getSeries(options = {}) {
+    const params = new URLSearchParams();
+    if (options.eventType) {
+      params.set('event_type', String(options.eventType));
+    }
+    if (options.metric) {
+      params.set('metric', String(options.metric));
+    }
+    if (options.entityId) {
+      params.set('entity_id', String(options.entityId));
+    }
+    if (options.limit != null) {
+      params.set('limit', String(options.limit));
+    }
+    const query = params.toString();
+    const path = `/api/v1/bff/series${query ? `?${query}` : ''}`;
+    const { data } = await this._request(path, {
+      method: 'GET',
+      token: options.token
+    });
+    return data;
+  }
+
+  async getForecastLstm(options = {}) {
+    const params = new URLSearchParams();
+    if (options.eventType) {
+      params.set('event_type', String(options.eventType));
+    }
+    if (options.metric) {
+      params.set('metric', String(options.metric));
+    }
+    if (options.entityId) {
+      params.set('entity_id', String(options.entityId));
+    }
+    if (options.strategy) {
+      params.set('strategy', String(options.strategy));
+    }
+    if (options.horizon != null) {
+      params.set('horizon', String(options.horizon));
+    }
+    if (options.window != null) {
+      params.set('window', String(options.window));
+    }
+    const query = params.toString();
+    const path = `/api/v1/bff/forecast/lstm${query ? `?${query}` : ''}`;
+    const { data } = await this._request(path, {
       method: 'GET',
       token: options.token
     });
@@ -145,17 +209,63 @@ export class MonitorApiClient {
   }
 
   async queryPathAnalysis(payload, options = {}) {
-    const { data } = await this._request('/api/v1/analysis/path/query', {
-      method: 'POST',
-      json: true,
-      body: JSON.stringify(payload || {}),
-      token: options.token
-    });
-    return data;
+    const entityId = options.entityId
+      || payload?.entity_id
+      || payload?.link_uid
+      || payload?.link_id
+      || Object.keys(payload?.metrics || {})[0]
+      || '';
+    const token = options.token || this.token;
+    try {
+      return await this.getForecastLstm({
+        eventType: payload?.event_type || 'link_metric',
+        metric: payload?.metric || 'rtt_ms',
+        entityId,
+        strategy: payload?.strategy || 'fallback',
+        horizon: payload?.horizon ?? 12,
+        window: payload?.window ?? 12,
+        token
+      });
+    } catch (err) {
+      if (![404, 405, 501].includes(err?.status)) {
+        throw err;
+      }
+      const { data } = await this._request('/api/v1/analysis/path/query', {
+        method: 'POST',
+        json: true,
+        body: JSON.stringify(payload || {}),
+        token
+      });
+      return data;
+    }
   }
 
   async analyzeFaultSpread(payload, options = {}) {
-    const { data } = await this._request('/api/v1/fault/spread/analyze', {
+    const token = options.token || this.token;
+    try {
+      const { data } = await this._request('/api/v1/bff/fault/spread', {
+        method: 'POST',
+        json: true,
+        body: JSON.stringify(payload || {}),
+        token
+      });
+      return data;
+    } catch (err) {
+      if (![404, 405, 501].includes(err?.status)) {
+        throw err;
+      }
+      const { data } = await this._request('/api/v1/fault/spread/analyze', {
+        method: 'POST',
+        json: true,
+        body: JSON.stringify(payload || {}),
+        token
+      });
+      return data;
+    }
+  }
+
+  async analyzeTaskImpact(payload, options = {}) {
+    const { data } = await this._request('/api/v1/bff/fault/task-impact', {
       method: 'POST',
       json: true,
       body: JSON.stringify(payload || {}),

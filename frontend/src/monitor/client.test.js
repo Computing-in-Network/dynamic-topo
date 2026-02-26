@@ -21,7 +21,7 @@ test('getSnapshot sends topology_epoch query', async () => {
     }
   });
   const res = await client.getSnapshot({ topologyEpoch: 1708848000, etag: 'W/"1708848000-9"' });
-  assert.equal(capturedUrl, 'http://collector/api/v1/monitor/snapshot?topology_epoch=1708848000');
+  assert.equal(capturedUrl, 'http://collector/api/v1/bff/snapshot?topology_epoch=1708848000');
   assert.equal(capturedHeaders['If-None-Match'], 'W/"1708848000-9"');
   assert.equal(res.notModified, false);
   assert.equal(res.etag, 'W/"1708848000-10"');
@@ -71,29 +71,34 @@ test('getSnapshot handles 304 not modified', async () => {
   assert.equal(res.etag, 'W/"1708848000-11"');
 });
 
-test('queryPathAnalysis posts payload', async () => {
+test('queryPathAnalysis uses bff forecast endpoint', async () => {
   let capturedPath = '';
-  let capturedBody = '';
   const client = new MonitorApiClient({
     baseUrl: 'http://collector',
     fetchImpl: async (url, options = {}) => {
       capturedPath = url;
-      capturedBody = options.body;
+      assert.equal(options.method, 'GET');
       return {
         ok: true,
         status: 200,
         async json() {
-          return { status: 'ok', result: { paths: [] } };
+          return { status: 'ok', result: { points: [] } };
         }
       };
     }
   });
-  await client.queryPathAnalysis({ src: 'A', dst: 'B' });
-  assert.equal(capturedPath, 'http://collector/api/v1/analysis/path/query');
-  assert.equal(capturedBody, JSON.stringify({ src: 'A', dst: 'B' }));
+  await client.queryPathAnalysis({
+    event_type: 'link_metric',
+    metric: 'rtt_ms',
+    entity_id: 'A<->B',
+    strategy: 'fallback',
+    horizon: 12,
+    window: 12
+  });
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/forecast/lstm?event_type=link_metric&metric=rtt_ms&entity_id=A%3C-%3EB&strategy=fallback&horizon=12&window=12');
 });
 
-test('analyzeFaultSpread posts payload', async () => {
+test('analyzeFaultSpread posts to bff endpoint', async () => {
   let capturedPath = '';
   let capturedBody = '';
   const client = new MonitorApiClient({
@@ -111,6 +116,52 @@ test('analyzeFaultSpread posts payload', async () => {
     }
   });
   await client.analyzeFaultSpread({ alarm_nodes: ['A'] });
-  assert.equal(capturedPath, 'http://collector/api/v1/fault/spread/analyze');
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/fault/spread');
+  assert.equal(capturedBody, JSON.stringify({ alarm_nodes: ['A'] }));
+});
+
+test('getSeries sends query params', async () => {
+  let capturedPath = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url) => {
+      capturedPath = url;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', data: { points: [] } };
+        }
+      };
+    }
+  });
+  await client.getSeries({
+    eventType: 'link_metric',
+    metric: 'rtt_ms',
+    entityId: 'A<->B',
+    limit: 120
+  });
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/series?event_type=link_metric&metric=rtt_ms&entity_id=A%3C-%3EB&limit=120');
+});
+
+test('analyzeTaskImpact posts to bff endpoint', async () => {
+  let capturedPath = '';
+  let capturedBody = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      capturedPath = url;
+      capturedBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', result: { impacted_tasks: [] } };
+        }
+      };
+    }
+  });
+  await client.analyzeTaskImpact({ alarm_nodes: ['A'] });
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/fault/task-impact');
   assert.equal(capturedBody, JSON.stringify({ alarm_nodes: ['A'] }));
 });

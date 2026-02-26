@@ -339,6 +339,8 @@ export function App() {
   const [collectorMetrics, setCollectorMetrics] = useState(null);
   const [pathAnalysis, setPathAnalysis] = useState(null);
   const [faultSpread, setFaultSpread] = useState(null);
+  const [taskImpact, setTaskImpact] = useState(null);
+  const [seriesSnapshot, setSeriesSnapshot] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [analysisSupported, setAnalysisSupported] = useState(true);
@@ -823,24 +825,30 @@ export function App() {
         pushToast(msg, 'warn');
         return;
       }
+      const entityId = selectedLinkMetric?.linkUid || (src && dst ? [src, dst].sort().join('<->') : '');
       setAnalysisSummary({
         src,
         dst,
+        entityId,
         links: links.length,
         metrics: Object.keys(metrics).length,
         alarmNodes: alarmNodes.length
       });
 
-      const [pathResp, spreadResp] = await Promise.all([
+      const [seriesResp, pathResp, spreadResp, impactResp] = await Promise.all([
+        monitorClientRef.current.getSeries({
+          eventType: 'link_metric',
+          metric: 'rtt_ms',
+          entityId,
+          limit: 120
+        }),
         monitorClientRef.current.queryPathAnalysis({
-          task_id: selectedFlow?.flowId || undefined,
-          biz: 'frontend_live',
-          src,
-          dst,
-          top_n: 3,
-          max_hops: 6,
-          links,
-          metrics
+          event_type: 'link_metric',
+          metric: 'rtt_ms',
+          entity_id: entityId,
+          strategy: 'fallback',
+          horizon: 12,
+          window: 12
         }),
         monitorClientRef.current.analyzeFaultSpread({
           alarm_nodes: alarmNodes,
@@ -848,14 +856,28 @@ export function App() {
           max_depth: 3,
           cascade_threshold: 0.6,
           links
+        }),
+        monitorClientRef.current.analyzeTaskImpact({
+          alarm_nodes: alarmNodes,
+          tasks: [
+            {
+              task_id: selectedFlow?.flowId || `${src}->${dst}`,
+              src_node_id: src,
+              dst_node_id: dst,
+              path: selectedFlow?.path || []
+            }
+          ],
+          link_metrics: metrics
         })
       ]);
 
       const pathResult = getAnalysisResult(pathResp);
+      const seriesResult = getAnalysisResult(seriesResp) || seriesResp || null;
       const spreadResult = getAnalysisResult(spreadResp);
+      const impactResult = getAnalysisResult(impactResp);
       const pathCount = Array.isArray(pathResult?.paths) ? pathResult.paths.length : 0;
       const impactedCount = Array.isArray(spreadResult?.impacted_nodes) ? spreadResult.impacted_nodes.length : 0;
-      if (!pathResult && !spreadResult) {
+      if (!pathResult && !spreadResult && !impactResult) {
         const msg = '高级分析返回空结果：后端未返回 result/data';
         setAnalysisError(msg);
         setMonitorActionStatus(msg);
@@ -868,8 +890,10 @@ export function App() {
       } else {
         setAnalysisError('');
       }
+      setSeriesSnapshot(seriesResult);
       setPathAnalysis(pathResult);
       setFaultSpread(spreadResult);
+      setTaskImpact(impactResult);
       setMonitorActionStatus('已刷新路径分析与故障传播结果');
       pushToast('高级分析已更新', 'ok');
       setAnalysisSupported(true);
@@ -1896,8 +1920,8 @@ export function App() {
           <p>failures: {monitorConsecutiveFailures}</p>
           <p>last success: {monitorLastSuccessAt ? new Date(monitorLastSuccessAt).toLocaleTimeString() : '-'}</p>
           <p>collector nats: {collectorHealth?.nats_connected == null ? '-' : (collectorHealth.nats_connected ? 'up' : 'down')}</p>
-          <p>collector total: {collectorMetrics?.total ?? '-'}</p>
-          <p>collector success_rate: {collectorMetrics?.success_rate != null ? Number(collectorMetrics.success_rate).toFixed(2) : '-'}</p>
+          <p>collector total: {collectorMetrics?.total ?? collectorMetrics?.requests_total ?? collectorMetrics?.request_total ?? '-'}</p>
+          <p>collector success_rate: {collectorMetrics?.success_rate != null ? Number(collectorMetrics.success_rate).toFixed(2) : (collectorMetrics?.availability != null ? Number(collectorMetrics.availability).toFixed(2) : '-')}</p>
           <div className="monitor-epoch-row">
             <span>epoch</span>
             <select
@@ -2006,7 +2030,14 @@ export function App() {
             {analysisSummary ? (
               <div className="analysis-block">
                 <div><strong>Request</strong>: {analysisSummary.src} -&gt; {analysisSummary.dst}</div>
+                <div>entity: {analysisSummary.entityId || '-'}</div>
                 <div>links: {analysisSummary.links}, metrics: {analysisSummary.metrics}, alarm_nodes: {analysisSummary.alarmNodes}</div>
+              </div>
+            ) : null}
+            {seriesSnapshot ? (
+              <div className="analysis-block">
+                <div><strong>Series</strong>: metric=rtt_ms</div>
+                <div>points: {seriesSnapshot.points?.length ?? seriesSnapshot.items?.length ?? seriesSnapshot.series?.length ?? '-'}</div>
               </div>
             ) : null}
             {pathAnalysis ? (
@@ -2021,6 +2052,13 @@ export function App() {
                 <div><strong>Spread</strong>: mode={faultSpread.mode || '-'}</div>
                 <div>impacted: {faultSpread.impacted_nodes?.length ?? 0}, boundary: {faultSpread.boundary_nodes?.length ?? 0}</div>
                 <div>fallback: {faultSpread.fallback ? 'yes' : 'no'}</div>
+              </div>
+            ) : null}
+            {taskImpact ? (
+              <div className="analysis-block">
+                <div><strong>Task Impact</strong></div>
+                <div>impacted_tasks: {taskImpact.impacted_tasks?.length ?? taskImpact.tasks?.length ?? '-'}</div>
+                <div>level: {taskImpact.level || taskImpact.severity || '-'}</div>
               </div>
             ) : null}
           </div>
