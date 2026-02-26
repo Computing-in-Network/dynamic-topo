@@ -265,3 +265,48 @@ test('analyzeOverview falls back to spread + task-impact when overview is unavai
   assert.equal(res.tasks.length, 1);
   assert.equal(res.alerts.length, 1);
 });
+
+test('analyzeRun posts to run endpoint', async () => {
+  let capturedPath = '';
+  let capturedBody = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      capturedPath = url;
+      capturedBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', contract_version: 'analysis.v1', summary: {} };
+        }
+      };
+    }
+  });
+  await client.analyzeRun({ mode: 'global', scope_type: 'network', scope_id: 'all', topology_epoch: '1708848000' });
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/analysis/run');
+  assert.equal(capturedBody, JSON.stringify({ mode: 'global', scope_type: 'network', scope_id: 'all', topology_epoch: '1708848000' }));
+});
+
+test('simulation api methods use expected endpoints', async () => {
+  const paths = [];
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      paths.push(`${options.method || 'GET'} ${url}`);
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', simulation_id: 'sim-1', timeline: [] };
+        }
+      };
+    }
+  });
+  await client.createSimulation({ scenario_type: 'link_down' });
+  await client.stepSimulation('sim-1', {});
+  await client.getSimulationTimeline('sim-1');
+  assert.equal(paths[0], 'POST http://collector/api/v1/bff/simulation/create');
+  assert.equal(paths[1], 'POST http://collector/api/v1/bff/simulation/sim-1/step');
+  assert.equal(paths[2], 'GET http://collector/api/v1/bff/simulation/sim-1/timeline');
+});

@@ -360,4 +360,61 @@ export class MonitorApiClient {
       return buildOverviewFromLegacy(spread, impact);
     }
   }
+
+  async analyzeRun(payload, options = {}) {
+    const token = options.token || this.token;
+    const body = JSON.stringify(payload || {});
+    try {
+      const { data } = await this._request('/api/v1/bff/analysis/run', {
+        method: 'POST',
+        json: true,
+        body,
+        token
+      });
+      return data;
+    } catch (err) {
+      if (![404, 405, 501].includes(err?.status)) {
+        throw err;
+      }
+      return this.analyzeOverview(payload, { token });
+    }
+  }
+
+  async analyzeGlobalImpact(payload, options = {}) {
+    const { data } = await this._request('/api/v1/bff/analysis/global-impact', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
+    return data;
+  }
+
+  async createSimulation(payload, options = {}) {
+    const { data } = await this._request('/api/v1/bff/simulation/create', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
+    return data;
+  }
+
+  async stepSimulation(simulationId, payload = {}, options = {}) {
+    const { data } = await this._request(`/api/v1/bff/simulation/${encodeURIComponent(simulationId)}/step`, {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
+    return data;
+  }
+
+  async getSimulationTimeline(simulationId, options = {}) {
+    const { data } = await this._request(`/api/v1/bff/simulation/${encodeURIComponent(simulationId)}/timeline`, {
+      method: 'GET',
+      token: options.token
+    });
+    return data;
+  }
 }

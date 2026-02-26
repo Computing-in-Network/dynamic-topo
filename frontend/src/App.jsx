@@ -345,6 +345,8 @@ export function App() {
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
   const [analysisSupported, setAnalysisSupported] = useState(true);
+  const [simulationLoading, setSimulationLoading] = useState(false);
+  const [simulationResult, setSimulationResult] = useState(null);
   const [analysisSummary, setAnalysisSummary] = useState(null);
   const [replayMode, setReplayMode] = useState(false);
   const [showLayerPanel, setShowLayerPanel] = useState(false);
@@ -870,7 +872,7 @@ export function App() {
           : [entityId].filter(Boolean)
       };
 
-      const [seriesResp, pathResp, overviewResp] = await Promise.all([
+      const [seriesResp, pathResp, runResp] = await Promise.all([
         monitorClientRef.current.getSeries({
           eventType: 'link_metric',
           metric: 'rtt_ms',
@@ -885,7 +887,7 @@ export function App() {
           horizon: 12,
           window: 12
         }),
-        monitorClientRef.current.analyzeOverview({
+        monitorClientRef.current.analyzeRun({
           mode: analysisMode,
           scope_type: scopeType,
           scope_id: scopeId,
@@ -904,10 +906,10 @@ export function App() {
       const pathResult = getAnalysisResult(pathResp);
       const seriesResult = getAnalysisResult(seriesResp) || seriesResp || null;
       const overviewResult = (() => {
-        if (overviewResp && typeof overviewResp === 'object' && overviewResp.contract_version) {
-          return overviewResp;
+        if (runResp && typeof runResp === 'object' && runResp.contract_version) {
+          return runResp;
         }
-        return getAnalysisResult(overviewResp);
+        return getAnalysisResult(runResp);
       })();
       const spreadResult = overviewResult?.topology_impact || null;
       const impactResult = overviewResult || null;
@@ -945,6 +947,67 @@ export function App() {
       pushToast(msg, 'warn');
     } finally {
       setAnalysisLoading(false);
+    }
+  }
+
+  async function runSimulationFlow() {
+    if (!monitorClientRef.current || !frame) {
+      const msg = '推演失败：monitor API 或拓扑帧不可用';
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
+      return;
+    }
+    let scopeId = selectedLinkMetric?.linkUid || '';
+    if (!scopeId && selectedLink) {
+      scopeId = [selectedLink.a.id, selectedLink.b.id].sort().join('<->');
+    }
+    if (!scopeId) {
+      const first = Object.values(monitorSnapshot.byLink || {})[0];
+      scopeId = first?.linkUid || '';
+    }
+    if (!scopeId) {
+      const msg = '推演失败：当前无可用链路 scope_id';
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
+      return;
+    }
+    try {
+      setSimulationLoading(true);
+      const createResp = await monitorClientRef.current.createSimulation({
+        scenario_type: 'link_down',
+        topology_epoch: String(monitorEpoch || 1708848000),
+        steps_total: 5,
+        params: { link_id: scopeId }
+      });
+      const simulationId = createResp?.simulation_id || createResp?.result?.simulation_id;
+      if (!simulationId) {
+        throw new Error('推演创建成功但未返回 simulation_id');
+      }
+      let status = createResp?.status || createResp?.result?.status || 'running';
+      for (let i = 0; i < 8 && status !== 'completed'; i += 1) {
+        const stepResp = await monitorClientRef.current.stepSimulation(simulationId, {});
+        status = stepResp?.status || stepResp?.result?.status || status;
+        if (status === 'completed') {
+          break;
+        }
+      }
+      const timelineResp = await monitorClientRef.current.getSimulationTimeline(simulationId);
+      const timeline = timelineResp?.timeline || timelineResp?.result?.timeline || [];
+      setSimulationResult({
+        simulationId,
+        status,
+        timelineCount: Array.isArray(timeline) ? timeline.length : 0,
+        latest: Array.isArray(timeline) && timeline.length > 0 ? timeline[timeline.length - 1] : null
+      });
+      const msg = `推演完成：${simulationId}，timeline=${Array.isArray(timeline) ? timeline.length : 0}`;
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'ok');
+    } catch (err) {
+      const msg = err?.message || '推演失败';
+      setMonitorActionStatus(msg);
+      pushToast(msg, 'warn');
+    } finally {
+      setSimulationLoading(false);
     }
   }
 
@@ -2062,6 +2125,7 @@ export function App() {
               <span>高级分析</span>
               <div className="monitor-header-actions">
                 <button type="button" onClick={runAdvancedAnalysis} disabled={analysisLoading || !analysisSupported}>{analysisLoading ? '分析中...' : (analysisSupported ? '运行分析' : '接口不可用')}</button>
+                <button type="button" onClick={runSimulationFlow} disabled={simulationLoading}>{simulationLoading ? '推演中...' : '运行推演'}</button>
               </div>
             </div>
             {analysisError ? <div className="analysis-error">{analysisError}</div> : null}
@@ -2100,6 +2164,14 @@ export function App() {
                 <div>risk: {taskImpact.summary?.risk_level || '-'}, tasks: {taskImpact.summary?.task_total ?? taskImpact.tasks?.length ?? '-'}</div>
                 <div>high_priority: {taskImpact.summary?.high_priority_tasks ?? '-'}, avg_score: {taskImpact.summary?.average_priority_score ?? '-'}</div>
                 <div>alerts: {taskImpact.alerts?.length ?? 0}, top_task: {taskImpact.tasks?.[0]?.task_id || '-'}</div>
+              </div>
+            ) : null}
+            {simulationResult ? (
+              <div className="analysis-block">
+                <div><strong>Simulation</strong>: {simulationResult.simulationId}</div>
+                <div>status: {simulationResult.status || '-'}</div>
+                <div>timeline: {simulationResult.timelineCount}</div>
+                <div>latest_risk: {simulationResult.latest?.risk_level || simulationResult.latest?.risk || '-'}</div>
               </div>
             ) : null}
           </div>
