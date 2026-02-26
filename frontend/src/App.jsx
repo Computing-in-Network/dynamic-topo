@@ -340,6 +340,7 @@ export function App() {
   const [pathAnalysis, setPathAnalysis] = useState(null);
   const [faultSpread, setFaultSpread] = useState(null);
   const [taskImpact, setTaskImpact] = useState(null);
+  const [analysisOverview, setAnalysisOverview] = useState(null);
   const [seriesSnapshot, setSeriesSnapshot] = useState(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
@@ -758,6 +759,7 @@ export function App() {
 
       const byLink = Object.values(monitorSnapshot.byLink || {});
       const metrics = {};
+      const linkMetricsOverview = {};
       const linkHealth = new Map();
       for (const item of byLink) {
         const src = resolveTopoNodeId(item.srcNodeUid || item.srcNodeId) || item.srcNodeId || item.srcNodeUid;
@@ -770,6 +772,11 @@ export function App() {
           latency_ms: item.rttMs ?? 0,
           loss_rate: item.lossRate ?? 0,
           jitter_ms: item.jitterMs ?? 0
+        };
+        linkMetricsOverview[key] = {
+          state: item.state || 'UP',
+          rtt_ms: item.rttMs ?? 0,
+          loss_rate: item.lossRate ?? 0
         };
         const h = item.health === 'critical' ? 0.2 : item.health === 'warning' ? 0.5 : item.health === 'normal' ? 0.9 : 0.7;
         linkHealth.set(key, h);
@@ -826,16 +833,44 @@ export function App() {
         return;
       }
       const entityId = selectedLinkMetric?.linkUid || (src && dst ? [src, dst].sort().join('<->') : '');
+      let analysisMode = 'auto';
+      let scopeType = 'network';
+      let scopeId = 'all';
+      if (selected?.kind === 'link' && selectedLink) {
+        analysisMode = 'focused';
+        scopeType = 'link';
+        scopeId = selectedLinkMetric?.linkUid || [selectedLink.a.id, selectedLink.b.id].sort().join('<->');
+      } else if (selected?.kind === 'node' && selected?.id) {
+        analysisMode = 'focused';
+        scopeType = 'node';
+        scopeId = selected.id;
+      }
+      if (monitorEpoch == null || monitorEpoch === '') {
+        const msg = '分析失败：topology_epoch 不能为空';
+        setAnalysisError(msg);
+        setMonitorActionStatus(msg);
+        pushToast(msg, 'warn');
+        return;
+      }
       setAnalysisSummary({
-        src,
-        dst,
+        mode: analysisMode,
+        scopeType,
+        scopeId,
+        topologyEpoch: String(monitorEpoch),
         entityId,
-        links: links.length,
-        metrics: Object.keys(metrics).length,
-        alarmNodes: alarmNodes.length
+        linkCount: links.length
       });
 
-      const [seriesResp, pathResp, spreadResp, impactResp] = await Promise.all([
+      const analysisTask = {
+        task_id: selectedFlow?.flowId || `${src}->${dst}`,
+        name: selectedFlow?.flowId ? `flow:${selectedFlow.flowId}` : `${src}->${dst}`,
+        criticality: 0.8,
+        links: selectedFlow?.path?.length > 1
+          ? selectedFlow.path.slice(0, -1).map((nodeId, idx) => [nodeId, selectedFlow.path[idx + 1]].sort().join('<->'))
+          : [entityId].filter(Boolean)
+      };
+
+      const [seriesResp, pathResp, overviewResp] = await Promise.all([
         monitorClientRef.current.getSeries({
           eventType: 'link_metric',
           metric: 'rtt_ms',
@@ -850,40 +885,42 @@ export function App() {
           horizon: 12,
           window: 12
         }),
-        monitorClientRef.current.analyzeFaultSpread({
-          alarm_nodes: alarmNodes,
-          mode: 'cascade',
+        monitorClientRef.current.analyzeOverview({
+          mode: analysisMode,
+          scope_type: scopeType,
+          scope_id: scopeId,
+          topology_epoch: String(monitorEpoch),
+          include_debug: false,
           max_depth: 3,
           cascade_threshold: 0.6,
-          links
-        }),
-        monitorClientRef.current.analyzeTaskImpact({
+          // Compatibility payload for current fallback path; backend can ignore.
           alarm_nodes: alarmNodes,
-          tasks: [
-            {
-              task_id: selectedFlow?.flowId || `${src}->${dst}`,
-              src_node_id: src,
-              dst_node_id: dst,
-              path: selectedFlow?.path || []
-            }
-          ],
-          link_metrics: metrics
+          tasks: [analysisTask],
+          link_metrics: linkMetricsOverview,
+          links
         })
       ]);
 
       const pathResult = getAnalysisResult(pathResp);
       const seriesResult = getAnalysisResult(seriesResp) || seriesResp || null;
-      const spreadResult = getAnalysisResult(spreadResp);
-      const impactResult = getAnalysisResult(impactResp);
+      const overviewResult = (() => {
+        if (overviewResp && typeof overviewResp === 'object' && overviewResp.contract_version) {
+          return overviewResp;
+        }
+        return getAnalysisResult(overviewResp);
+      })();
+      const spreadResult = overviewResult?.topology_impact || null;
+      const impactResult = overviewResult || null;
       const pathCount = Array.isArray(pathResult?.paths) ? pathResult.paths.length : 0;
       const impactedCount = Array.isArray(spreadResult?.impacted_nodes) ? spreadResult.impacted_nodes.length : 0;
+      const taskCount = Array.isArray(impactResult?.tasks) ? impactResult.tasks.length : 0;
       if (!pathResult && !spreadResult && !impactResult) {
         const msg = '高级分析返回空结果：后端未返回 result/data';
         setAnalysisError(msg);
         setMonitorActionStatus(msg);
         pushToast(msg, 'warn');
-      } else if (pathCount === 0 && impactedCount === 0) {
-        const msg = '高级分析已调用，但返回空集合（paths=0, impacted_nodes=0）';
+      } else if (pathCount === 0 && impactedCount === 0 && taskCount === 0) {
+        const msg = '高级分析已调用，但返回空集合（paths=0, impacted_nodes=0, tasks=0）';
         setAnalysisError(msg);
         setMonitorActionStatus(msg);
         pushToast(msg, 'warn');
@@ -894,7 +931,8 @@ export function App() {
       setPathAnalysis(pathResult);
       setFaultSpread(spreadResult);
       setTaskImpact(impactResult);
-      setMonitorActionStatus('已刷新路径分析与故障传播结果');
+      setAnalysisOverview(overviewResult);
+      setMonitorActionStatus('已刷新高级分析结果');
       pushToast('高级分析已更新', 'ok');
       setAnalysisSupported(true);
     } catch (err) {
@@ -2029,9 +2067,11 @@ export function App() {
             {analysisError ? <div className="analysis-error">{analysisError}</div> : null}
             {analysisSummary ? (
               <div className="analysis-block">
-                <div><strong>Request</strong>: {analysisSummary.src} -&gt; {analysisSummary.dst}</div>
+                <div><strong>Request</strong>: mode={analysisSummary.mode || '-'}</div>
+                <div>scope: {analysisSummary.scopeType || '-'} / {analysisSummary.scopeId || '-'}</div>
+                <div>epoch: {analysisSummary.topologyEpoch || '-'}</div>
                 <div>entity: {analysisSummary.entityId || '-'}</div>
-                <div>links: {analysisSummary.links}, metrics: {analysisSummary.metrics}, alarm_nodes: {analysisSummary.alarmNodes}</div>
+                <div>links: {analysisSummary.linkCount ?? '-'}</div>
               </div>
             ) : null}
             {seriesSnapshot ? (
@@ -2049,16 +2089,17 @@ export function App() {
             ) : null}
             {faultSpread ? (
               <div className="analysis-block">
-                <div><strong>Spread</strong>: mode={faultSpread.mode || '-'}</div>
-                <div>impacted: {faultSpread.impacted_nodes?.length ?? 0}, boundary: {faultSpread.boundary_nodes?.length ?? 0}</div>
-                <div>fallback: {faultSpread.fallback ? 'yes' : 'no'}</div>
+                <div><strong>Topology Impact</strong></div>
+                <div>seeds: {faultSpread.seed_nodes?.length ?? 0}, impacted_nodes: {faultSpread.impacted_nodes?.length ?? 0}</div>
+                <div>impacted_links: {faultSpread.impacted_links?.length ?? 0}, boundary: {faultSpread.boundary_nodes?.length ?? 0}</div>
               </div>
             ) : null}
             {taskImpact ? (
               <div className="analysis-block">
-                <div><strong>Task Impact</strong></div>
-                <div>impacted_tasks: {taskImpact.impacted_tasks?.length ?? taskImpact.tasks?.length ?? '-'}</div>
-                <div>level: {taskImpact.level || taskImpact.severity || '-'}</div>
+                <div><strong>Overview</strong>: {taskImpact.contract_version || 'analysis.v1'}</div>
+                <div>risk: {taskImpact.summary?.risk_level || '-'}, tasks: {taskImpact.summary?.task_total ?? taskImpact.tasks?.length ?? '-'}</div>
+                <div>high_priority: {taskImpact.summary?.high_priority_tasks ?? '-'}, avg_score: {taskImpact.summary?.average_priority_score ?? '-'}</div>
+                <div>alerts: {taskImpact.alerts?.length ?? 0}, top_task: {taskImpact.tasks?.[0]?.task_id || '-'}</div>
               </div>
             ) : null}
           </div>

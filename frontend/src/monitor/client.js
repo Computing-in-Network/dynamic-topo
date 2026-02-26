@@ -11,6 +11,67 @@ function joinUrl(baseUrl, path) {
   return `${baseUrl.replace(/\/+$/, '')}${path}`;
 }
 
+function deriveRiskLevelFromTasks(tasks = []) {
+  const statuses = tasks.map((t) => t?.status).filter(Boolean);
+  if (statuses.includes('disconnected')) {
+    return 'critical';
+  }
+  if (statuses.includes('degraded') || statuses.includes('latency_anomaly')) {
+    return 'warning';
+  }
+  return 'normal';
+}
+
+function buildOverviewFromLegacy(spread = {}, impact = {}) {
+  const spreadResult = spread?.result && typeof spread.result === 'object' ? spread.result : spread;
+  const impactResult = impact?.result && typeof impact.result === 'object' ? impact.result : impact;
+  const tasks = Array.isArray(impactResult?.tasks) ? impactResult.tasks : [];
+  const taskStatusCounts = {
+    normal: 0,
+    latency_anomaly: 0,
+    degraded: 0,
+    disconnected: 0
+  };
+  let highPriorityTasks = 0;
+  let scoreSum = 0;
+  let scoreCount = 0;
+  for (const task of tasks) {
+    const status = task?.status;
+    if (status && Object.prototype.hasOwnProperty.call(taskStatusCounts, status)) {
+      taskStatusCounts[status] += 1;
+    }
+    const score = Number(task?.priority_score);
+    if (Number.isFinite(score)) {
+      scoreSum += score;
+      scoreCount += 1;
+      if (score >= 70) {
+        highPriorityTasks += 1;
+      }
+    }
+  }
+  return {
+    status: 'ok',
+    contract_version: 'analysis.v1',
+    summary: {
+      risk_level: deriveRiskLevelFromTasks(tasks),
+      task_total: tasks.length,
+      task_status_counts: taskStatusCounts,
+      high_priority_tasks: highPriorityTasks,
+      average_priority_score: scoreCount > 0 ? Number((scoreSum / scoreCount).toFixed(2)) : 0
+    },
+    topology_impact: {
+      seed_nodes: spreadResult?.seeds || [],
+      impacted_nodes: spreadResult?.impacted_nodes || [],
+      impacted_links: spreadResult?.impacted_links || [],
+      boundary_nodes: spreadResult?.boundary_nodes || []
+    },
+    tasks,
+    alerts: tasks
+      .map((item) => item?.alert_item)
+      .filter((item) => item && typeof item === 'object')
+  };
+}
+
 export class MonitorApiError extends Error {
   constructor(message, details = {}) {
     super(message);
@@ -272,5 +333,31 @@ export class MonitorApiClient {
       token: options.token
     });
     return data;
+  }
+
+  async analyzeOverview(payload, options = {}) {
+    const token = options.token || this.token;
+    const body = JSON.stringify(payload || {});
+    try {
+      const { data } = await this._request('/api/v1/bff/analysis/overview', {
+        method: 'POST',
+        json: true,
+        body,
+        token
+      });
+      return data;
+    } catch (err) {
+      if (![404, 405, 501].includes(err?.status)) {
+        throw err;
+      }
+      const [spread, impact] = await Promise.all([
+        this.analyzeFaultSpread(payload || {}, { token }),
+        this.analyzeTaskImpact({
+          tasks: payload?.tasks || [],
+          link_metrics: payload?.link_metrics || {}
+        }, { token })
+      ]);
+      return buildOverviewFromLegacy(spread, impact);
+    }
   }
 }

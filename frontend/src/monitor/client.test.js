@@ -165,3 +165,103 @@ test('analyzeTaskImpact posts to bff endpoint', async () => {
   assert.equal(capturedPath, 'http://collector/api/v1/bff/fault/task-impact');
   assert.equal(capturedBody, JSON.stringify({ alarm_nodes: ['A'] }));
 });
+
+test('analyzeOverview posts to single analysis contract endpoint', async () => {
+  let capturedPath = '';
+  let capturedBody = '';
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      capturedPath = url;
+      capturedBody = options.body;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return { status: 'ok', contract_version: 'analysis.v1', summary: {} };
+        }
+      };
+    }
+  });
+  await client.analyzeOverview({ alarm_nodes: ['A'], links: [], tasks: [], link_metrics: {} });
+  assert.equal(capturedPath, 'http://collector/api/v1/bff/analysis/overview');
+  assert.equal(capturedBody, JSON.stringify({ alarm_nodes: ['A'], links: [], tasks: [], link_metrics: {} }));
+});
+
+test('analyzeOverview falls back to spread + task-impact when overview is unavailable', async () => {
+  const calls = [];
+  const client = new MonitorApiClient({
+    baseUrl: 'http://collector',
+    fetchImpl: async (url, options = {}) => {
+      calls.push({ url, method: options.method, body: options.body });
+      if (url.endsWith('/api/v1/bff/analysis/overview')) {
+        return {
+          ok: false,
+          status: 404,
+          async json() {
+            return { detail: 'Not Found' };
+          }
+        };
+      }
+      if (url.endsWith('/api/v1/bff/fault/spread')) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              status: 'ok',
+              result: {
+                seeds: ['A'],
+                impacted_nodes: ['A', 'B'],
+                impacted_links: ['A<->B'],
+                boundary_nodes: []
+              }
+            };
+          }
+        };
+      }
+      if (url.endsWith('/api/v1/bff/fault/task-impact')) {
+        return {
+          ok: true,
+          status: 200,
+          async json() {
+            return {
+              status: 'ok',
+              result: {
+                tasks: [
+                  {
+                    task_id: 't1',
+                    status: 'degraded',
+                    priority_score: 72,
+                    alert_item: { task_id: 't1', title: 'x' }
+                  }
+                ]
+              }
+            };
+          }
+        };
+      }
+      return {
+        ok: false,
+        status: 500,
+        async json() {
+          return { status: 'error', error_message: 'unexpected' };
+        }
+      };
+    }
+  });
+  const res = await client.analyzeOverview({
+    alarm_nodes: ['A'],
+    links: [{ src: 'A', dst: 'B' }],
+    tasks: [{ task_id: 't1' }],
+    link_metrics: { 'A<->B': { rtt_ms: 20, loss_rate: 0.01 } }
+  });
+  assert.equal(calls[0].url, 'http://collector/api/v1/bff/analysis/overview');
+  assert.equal(calls[1].url, 'http://collector/api/v1/bff/fault/spread');
+  assert.equal(calls[2].url, 'http://collector/api/v1/bff/fault/task-impact');
+  assert.equal(res.contract_version, 'analysis.v1');
+  assert.equal(res.summary.risk_level, 'warning');
+  assert.equal(res.topology_impact.impacted_nodes.length, 2);
+  assert.equal(res.tasks.length, 1);
+  assert.equal(res.alerts.length, 1);
+});
