@@ -89,6 +89,7 @@ const ENABLE_MONITOR_MOCK = import.meta.env.VITE_MONITOR_MOCK === '1';
 const defaultMonitorApiUrl = '/monitor-api';
 const MONITOR_API_URL = import.meta.env.VITE_MONITOR_API_URL || defaultMonitorApiUrl;
 const MONITOR_API_TOKEN = import.meta.env.VITE_MONITOR_API_TOKEN || '';
+const AUTO_CLEAR_FAULTS_ON_CONNECT = import.meta.env.VITE_AUTO_CLEAR_FAULTS_ON_CONNECT !== '0';
 
 function parseScopedLink(scopeId) {
   if (!scopeId || typeof scopeId !== 'string') {
@@ -118,6 +119,10 @@ function normalizeIdentity(value) {
     return '';
   }
   return String(value).trim().toLowerCase();
+}
+
+function normalizeIdentityLoose(value) {
+  return normalizeIdentity(value).replace(/[^a-z0-9]/g, '');
 }
 
 function svgDataUri(svg) {
@@ -391,6 +396,7 @@ export function App() {
   const topoNodeAliasRef = useRef(new Map());
   const replayFileInputRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const faultInitRef = useRef(false);
 
   function pushToast(text, level = 'ok') {
     setToast({ text, level, id: Date.now() });
@@ -701,7 +707,8 @@ export function App() {
       return raw;
     }
     const key = normalizeIdentity(raw);
-    return topoNodeAliasRef.current.get(key) || '';
+    const loose = normalizeIdentityLoose(raw);
+    return topoNodeAliasRef.current.get(key) || topoNodeAliasRef.current.get(loose) || '';
   }
 
   function focusMonitorAlarm(alarm) {
@@ -893,7 +900,8 @@ export function App() {
           scope_id: scopeId,
           topology_epoch: String(monitorEpoch),
           include_debug: false,
-          max_depth: 3,
+          max_depth: analysisMode === 'focused' ? 2 : 4,
+          spread_mode: analysisMode === 'focused' ? 'single_point' : 'cascade',
           cascade_threshold: 0.6,
           // Compatibility payload for current fallback path; backend can ignore.
           alarm_nodes: alarmNodes,
@@ -973,11 +981,16 @@ export function App() {
     }
     try {
       setSimulationLoading(true);
+      const scoped = parseScopedLink(scopeId);
       const createResp = await monitorClientRef.current.createSimulation({
         scenario_type: 'link_down',
         topology_epoch: String(monitorEpoch || 1708848000),
         steps_total: 5,
-        params: { link_id: scopeId }
+        params: {
+          link_id: scopeId,
+          src_node_id: selectedLink?.a?.id || scoped?.a || '',
+          dst_node_id: selectedLink?.b?.id || scoped?.b || ''
+        }
       });
       const simulationId = createResp?.simulation_id || createResp?.result?.simulation_id;
       if (!simulationId) {
@@ -1117,6 +1130,10 @@ export function App() {
       frameQueueRef.current = [];
       setQueueDepth(0);
       setControlStatus('');
+      if (AUTO_CLEAR_FAULTS_ON_CONNECT && !faultInitRef.current) {
+        faultInitRef.current = true;
+        ws.send(JSON.stringify({ action: 'clear_all_faults', request_id: `req-${Date.now()}` }));
+      }
       ws.send(JSON.stringify({ action: 'list_faults', request_id: `req-${Date.now()}` }));
     };
     ws.onclose = () => {
@@ -1132,6 +1149,12 @@ export function App() {
       if (payload && payload.type === 'control_ack') {
         if (Array.isArray(payload.faults)) {
           setFaults(payload.faults);
+        }
+        if (monitorClientRef.current) {
+          monitorClientRef.current.ingestFaultControlAck({
+            ...payload,
+            topology_epoch: String(monitorEpoch || 1708848000)
+          }).catch(() => {});
         }
         if (payload.ok) {
           setControlStatus(payload.deduplicated ? '已存在相同故障，已去重' : '控制操作成功');
@@ -1153,7 +1176,7 @@ export function App() {
       wsRef.current = null;
       ws.close();
     };
-  }, []);
+  }, [monitorEpoch]);
 
   const damagedNodeIds = new Set(
     faults
@@ -1522,8 +1545,10 @@ export function App() {
         has_link: degree > 0
       });
       topoAlias.set(normalizeIdentity(node.id), node.id);
+      topoAlias.set(normalizeIdentityLoose(node.id), node.id);
       if (node.name) {
         topoAlias.set(normalizeIdentity(node.name), node.id);
+        topoAlias.set(normalizeIdentityLoose(node.name), node.id);
       }
     }
     for (const metric of Object.values(monitorSnapshot.byNode)) {
@@ -1539,8 +1564,12 @@ export function App() {
       ];
       for (const alias of aliases) {
         const key = normalizeIdentity(alias);
+        const loose = normalizeIdentityLoose(alias);
         if (key) {
           topoAlias.set(key, topoNodeId);
+        }
+        if (loose) {
+          topoAlias.set(loose, topoNodeId);
         }
       }
     }
@@ -1571,16 +1600,50 @@ export function App() {
       flowEdgeKeys.add(edgeKey(selectedFlow.path[i], selectedFlow.path[i + 1]));
     }
   }
-  const selectedNodeMetric = selectedNode
-    ? (Object.values(monitorSnapshot.byNode).find((item) => {
-      const candidates = [
-        item.nodeId,
-        item.nodeUid,
-        item.topoNodeId,
-        item.dockerName
-      ].map(normalizeIdentity);
-      return candidates.includes(normalizeIdentity(selectedNode.id));
-    }) || null)
+  const nodeMetricAliasMap = new Map();
+  for (const item of Object.values(monitorSnapshot.byNode)) {
+    const aliases = [item.nodeId, item.nodeUid, item.topoNodeId, item.dockerName];
+    for (const alias of aliases) {
+      const strictKey = normalizeIdentity(alias);
+      const looseKey = normalizeIdentityLoose(alias);
+      if (strictKey && !nodeMetricAliasMap.has(strictKey)) {
+        nodeMetricAliasMap.set(strictKey, { metric: item, by: strictKey });
+      }
+      if (looseKey && !nodeMetricAliasMap.has(looseKey)) {
+        nodeMetricAliasMap.set(looseKey, { metric: item, by: looseKey });
+      }
+    }
+  }
+  const selectedNodeMetricHit = selectedNode
+    ? (() => {
+      const queryKeys = [
+        selectedNode.id,
+        selectedNode.name
+      ].flatMap((v) => [normalizeIdentity(v), normalizeIdentityLoose(v)]).filter(Boolean);
+      for (const q of queryKeys) {
+        const hit = nodeMetricAliasMap.get(q);
+        if (hit) {
+          return hit;
+        }
+      }
+      return null;
+    })()
+    : null;
+  const selectedNodeMetric = selectedNodeMetricHit?.metric || null;
+  const hoverNodeMetric = hoverInfo?.node
+    ? (() => {
+      const queryKeys = [
+        hoverInfo.node.id,
+        hoverInfo.node.name
+      ].flatMap((v) => [normalizeIdentity(v), normalizeIdentityLoose(v)]).filter(Boolean);
+      for (const q of queryKeys) {
+        const hit = nodeMetricAliasMap.get(q);
+        if (hit?.metric) {
+          return hit.metric;
+        }
+      }
+      return null;
+    })()
     : null;
   const selectedLinkMetric = selectedLink
     ? Object.values(monitorSnapshot.byLink).find((item) => {
@@ -1855,6 +1918,8 @@ export function App() {
           <div>orbit: {hoverInfo.node.orbit_class || '-'}</div>
           <div>links: {hoverInfo.node.has_link ? `yes (degree ${hoverInfo.node.degree})` : 'no'}</div>
           <div>alt: {hoverInfo.node.alt_m.toFixed(0)} m</div>
+          <div>cpu: {hoverNodeMetric?.cpuRatio != null ? `${(hoverNodeMetric.cpuRatio * 100).toFixed(1)}%` : '--'}</div>
+          <div>mem: {hoverNodeMetric?.memRatio != null ? `${(hoverNodeMetric.memRatio * 100).toFixed(1)}%` : '--'}</div>
         </div>
       ) : null}
       <aside className={`detail-panel ${(selected || selectedFlow) ? 'show' : ''}`}>
@@ -1889,6 +1954,7 @@ export function App() {
             <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
             <div>docker: {selectedNodeMetric?.dockerName || '-'}</div>
             <div>docker ip: {selectedNodeMetric?.dockerIp || '-'}</div>
+            <div>monitor match: {selectedNodeMetric ? (selectedNodeMetric.nodeId || selectedNodeMetric.nodeUid || '-') : 'unmatched'}</div>
             <div>monitor health: {selectedNodeMetric?.health || '-'}</div>
             <div>cpu: {selectedNodeMetric?.cpuRatio != null ? `${(selectedNodeMetric.cpuRatio * 100).toFixed(1)}%` : '--'}</div>
             <div>mem: {selectedNodeMetric?.memRatio != null ? `${(selectedNodeMetric.memRatio * 100).toFixed(1)}%` : '--'}</div>

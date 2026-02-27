@@ -217,6 +217,16 @@ export class MonitorApiClient {
     }
   }
 
+  async ingestFaultControlAck(payload, options = {}) {
+    const { data } = await this._request('/api/v1/ops/fault-injection/control-ack', {
+      method: 'POST',
+      json: true,
+      body: JSON.stringify(payload || {}),
+      token: options.token
+    });
+    return data;
+  }
+
   async getSeries(options = {}) {
     const params = new URLSearchParams();
     if (options.eventType) {
