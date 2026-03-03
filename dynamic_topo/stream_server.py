@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from dataclasses import asdict
 from time import perf_counter
 
@@ -251,6 +252,7 @@ def main() -> None:
         timestep_s=args.dt,
         link_policy_path=args.link_policy,
         link_policy_hot_reload=args.hot_reload_link_policy,
+        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
     )
     asyncio.run(run_server(args.host, args.port, config=config, seed=args.seed))
 
