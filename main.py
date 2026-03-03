@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from dynamic_topo import SimulationConfig, TopologyEngine
@@ -25,6 +26,7 @@ def main() -> None:
         timestep_s=args.dt,
         link_policy_path=args.link_policy,
         link_policy_hot_reload=args.hot_reload_link_policy,
+        redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
     )
     engine = TopologyEngine(config)
 
