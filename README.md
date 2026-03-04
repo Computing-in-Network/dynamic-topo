@@ -57,6 +57,16 @@ npm run dev
 VITE_TOPO_WS_URL=ws://<your-host>:8765 npm run dev
 ```
 
+监控面板默认请求 `http://localhost:9010/api/v1/monitor/snapshot`。可按需覆盖：
+
+```bash
+VITE_MONITOR_BASE_URL=http://<collector-host>:9010 npm run dev
+```
+
+可选参数：
+- `VITE_MONITOR_TOPOLOGY_EPOCH`：只拉取指定 `topology_epoch`
+- `VITE_MONITOR_POLL_MS`：快照轮询间隔（毫秒，最小 1000）
+
 ## 测试
 
 ```bash
