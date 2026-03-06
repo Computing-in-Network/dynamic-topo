@@ -85,6 +85,56 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest tests/test_topology.py tests/test
 uv run python scripts/generate_topology_snapshot.py --output tests/fixtures/topology_snapshot.json
 ```
 
+基于实时拓扑增量下发静态路由（300 容器）：
+
+```bash
+# 先演练，不实际写路由
+uv run python scripts/push_static_routes.py \
+  --ws-url ws://127.0.0.1:8765 \
+  --mapping-csv docs/node_mapping_300.csv \
+  --container-ip-source docker \
+  --min-stable-frames 2 \
+  --dry-run
+
+# 实际下发
+uv run python scripts/push_static_routes.py \
+  --ws-url ws://127.0.0.1:8765 \
+  --mapping-csv docs/node_mapping_300.csv \
+  --container-ip-source docker \
+  --min-stable-frames 2
+```
+
+- 路由为每节点 `/32` 目的前缀（默认 `10.200.0.0/16` 生成）
+- 仅做增量更新（`ip route replace` + 必要删除），避免每帧全量重灌
+- 容器 IP 可来自 CSV 扩展字段（`container_ip` 等）或 `docker inspect`
+- 当 `container_name` 失配时，脚本会自动尝试 `container_id`（若 CSV 提供）
+
+基于实时拓扑下发 `erv300_sim` 二层策略（`/opt/sim/policy.json`）：
+
+```bash
+# 演练：仅生成策略并输出摘要，不写入仿真器
+uv run python scripts/push_sim_policy.py \
+  --ws-url ws://127.0.0.1:8765 \
+  --mapping-csv docs/node_mapping_300.csv \
+  --sim-container erv300_sim \
+  --sim-policy-path /opt/sim/policy.json \
+  --min-stable-frames 2 \
+  --dry-run --once
+
+# 实际下发：写入 policy.json 并向 l2_center_sim.py 发送 HUP 热重载
+uv run python scripts/push_sim_policy.py \
+  --ws-url ws://127.0.0.1:8765 \
+  --mapping-csv docs/node_mapping_300.csv \
+  --sim-container erv300_sim \
+  --sim-policy-path /opt/sim/policy.json \
+  --min-stable-frames 2 \
+  --once
+```
+
+- 规则由实时 `links` 生成：每条边生成双向 `unicast/forward`
+- 通过 `veth_0` MAC 做节点映射，避免依赖容器 IP
+- 默认禁用 WS 代理（可加 `--respect-proxy` 覆盖）
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`
