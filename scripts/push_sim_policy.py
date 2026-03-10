@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -53,7 +54,7 @@ def resolve_ws_connect():
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Subscribe dynamic-topo websocket frames and push L2 policy to erv300_sim."
+        description="Subscribe dynamic-topo websocket frames and push L2 policy to the simulator container."
     )
     parser.add_argument("--ws-url", default="ws://127.0.0.1:8765", help="Dynamic topology websocket URL")
     parser.add_argument(
@@ -64,7 +65,11 @@ def parse_args() -> argparse.Namespace:
             "Optional: container_id (used as fallback when container_name has changed)."
         ),
     )
-    parser.add_argument("--sim-container", default="erv300_sim", help="Simulator container name/id")
+    parser.add_argument(
+        "--sim-container",
+        default="auto",
+        help="Simulator container name/id, or auto to infer <prefix>_sim from mapping-csv",
+    )
     parser.add_argument("--sim-policy-path", default="/opt/sim/policy.json", help="Policy JSON path in simulator")
     parser.add_argument(
         "--sim-proc-pattern",
@@ -74,6 +79,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--node-mac-ifname", default="veth_0", help="Interface name used as node MAC source")
     parser.add_argument("--default-action", default="drop", help="Simulator default_action for no-match traffic")
     parser.add_argument("--min-stable-frames", type=int, default=2, help="Only apply when same edge set lasts N frames")
+    parser.add_argument(
+        "--min-apply-interval-s",
+        type=float,
+        default=0.0,
+        help="Minimum seconds between successful policy applies after the initial apply",
+    )
     parser.add_argument("--workers", type=int, default=16, help="Parallel workers for container MAC resolution")
     parser.add_argument("--reconnect-s", type=float, default=1.5, help="Reconnect delay after WS errors")
     parser.add_argument("--command-timeout-s", type=float, default=30.0, help="Timeout for each docker command")
@@ -125,6 +136,22 @@ def _load_mapping_rows(mapping_csv: Path) -> list[dict[str, str]]:
     return rows
 
 
+def _infer_sim_container_from_rows(rows: list[dict[str, str]]) -> list[str]:
+    inferred: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        container_name = str(row.get("container_name", "")).strip()
+        match = re.match(r"^(.*)_r_\d+$", container_name)
+        if not match:
+            continue
+        sim_name = f"{match.group(1)}_sim"
+        if sim_name in seen:
+            continue
+        seen.add(sim_name)
+        inferred.append(sim_name)
+    return inferred
+
+
 def _inspect_one_container(ref: str, timeout_s: float) -> dict | None:
     proc = _run_cmd(["docker", "inspect", ref], timeout_s=timeout_s)
     if proc.returncode != 0:
@@ -139,6 +166,32 @@ def _inspect_one_container(ref: str, timeout_s: float) -> dict | None:
     if not isinstance(item, dict):
         return None
     return item
+
+
+def resolve_sim_container(args: argparse.Namespace) -> str:
+    requested = str(args.sim_container).strip()
+    if requested and requested.lower() != "auto":
+        return requested
+
+    rows = _load_mapping_rows(Path(args.mapping_csv))
+    timeout_s = float(args.command_timeout_s)
+
+    candidates = _infer_sim_container_from_rows(rows) + ["star300lite_sim", "erv300_sim"]
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if _inspect_one_container(candidate, timeout_s=timeout_s) is not None:
+            resolved.append(candidate)
+
+    if not resolved:
+        raise ValueError(
+            f"cannot resolve simulator container from mapping-csv={args.mapping_csv}; "
+            "checked inferred *_sim plus star300lite_sim and erv300_sim"
+        )
+    return resolved[0]
 
 
 def _extract_exec_mac(exec_target: str, ifname: str, timeout_s: float) -> str:
@@ -379,7 +432,7 @@ def _write_and_reload_policy(args: argparse.Namespace, policy: dict) -> ApplyRes
     hup_cmd = (
         "set -eu; "
         f"mv {shlex.quote(tmp_path)} {shlex.quote(sim_policy_path)}; "
-        f"pid=$(pgrep -f {shlex.quote(str(args.sim_proc_pattern))} | sort -n | tail -n1 || true); "
+        f"pid=$(pgrep -o -f {shlex.quote(str(args.sim_proc_pattern))} || true); "
         'if [ -z "$pid" ]; then echo "sim process not found" >&2; exit 1; fi; '
         'kill -HUP "$pid"'
     )
@@ -408,19 +461,23 @@ def _ws_connect_kwargs(ws_connect, respect_proxy: bool) -> dict:
 
 async def run_controller(args: argparse.Namespace) -> int:
     ws_connect = resolve_ws_connect()
+    args.sim_container = resolve_sim_container(args)
     entries = load_node_entries(args)
     known_nodes = {e.node_id for e in entries}
     policy_extra = _load_existing_policy_extra(args) if args.preserve_existing_extra else {}
 
     print(
         f"loaded nodes={len(entries)} ws={args.ws_url} sim={args.sim_container}:{args.sim_policy_path} "
-        f"dry_run={args.dry_run} min_stable_frames={args.min_stable_frames}"
+        f"dry_run={args.dry_run} min_stable_frames={args.min_stable_frames} "
+        f"min_apply_interval_s={args.min_apply_interval_s}"
     )
 
     pending_edges: set[tuple[str, str]] | None = None
     pending_count = 0
     committed_edges: set[tuple[str, str]] | None = None
     frame_idx = 0
+    last_apply_at = 0.0
+    min_apply_interval_s = max(0.0, float(args.min_apply_interval_s))
 
     ws_kwargs = _ws_connect_kwargs(ws_connect, respect_proxy=bool(args.respect_proxy))
     if "proxy" in ws_kwargs and ws_kwargs["proxy"] is None:
@@ -454,6 +511,10 @@ async def run_controller(args: argparse.Namespace) -> int:
                         continue
                     if committed_edges is not None and edges == committed_edges:
                         continue
+                    now = time.monotonic()
+                    if committed_edges is not None and min_apply_interval_s > 0.0:
+                        if now - last_apply_at < min_apply_interval_s:
+                            continue
 
                     policy = _build_policy(
                         edges=edges,
@@ -471,6 +532,8 @@ async def run_controller(args: argparse.Namespace) -> int:
                         print(f"[error] {res.error}")
 
                     committed_edges = set(edges)
+                    if res.ok:
+                        last_apply_at = now
                     if args.once:
                         return 0 if res.ok else 2
         except asyncio.CancelledError:  # pragma: no cover

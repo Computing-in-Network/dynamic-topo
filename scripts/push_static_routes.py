@@ -4,11 +4,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import csv
+import inspect
 import ipaddress
 import json
 import re
 import subprocess
 import sys
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -83,9 +85,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--docker-network", default="", help="Specific docker network name when using inspect")
     parser.add_argument("--route-dev", default="", help="Optional route device name (for ip route replace ... dev <if>)")
     parser.add_argument("--min-stable-frames", type=int, default=2, help="Only apply when same edge set lasts N frames")
+    parser.add_argument(
+        "--min-apply-interval-s",
+        type=float,
+        default=0.0,
+        help="Minimum seconds between successful route applies after the initial apply",
+    )
     parser.add_argument("--workers", type=int, default=8, help="Parallel container workers for route apply")
     parser.add_argument("--reconnect-s", type=float, default=1.5, help="Reconnect delay after WS errors")
     parser.add_argument("--command-timeout-s", type=float, default=30.0, help="Timeout for each docker exec")
+    parser.add_argument(
+        "--respect-proxy",
+        action="store_true",
+        help="Allow websockets client to use proxy env vars (default: disable proxy for WS)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print commands only, do not execute")
     parser.add_argument(
         "--once",
@@ -519,24 +532,44 @@ def apply_routes_incremental(
     return next_state, results
 
 
+def _ws_connect_kwargs(ws_connect, respect_proxy: bool) -> dict:
+    kwargs = {"max_size": 20_000_000}
+    if respect_proxy:
+        return kwargs
+    try:
+        params = inspect.signature(ws_connect).parameters
+        if "proxy" in params:
+            kwargs["proxy"] = None
+    except Exception:
+        pass
+    return kwargs
+
+
 async def run_controller(args: argparse.Namespace) -> int:
     ws_connect = resolve_ws_connect()
     entries = load_node_entries(args)
     known_nodes = {e.node_id for e in entries}
     print(
         f"loaded nodes={len(entries)} ws={args.ws_url} source={args.container_ip_source} "
-        f"dry_run={args.dry_run} min_stable_frames={args.min_stable_frames}"
+        f"dry_run={args.dry_run} min_stable_frames={args.min_stable_frames} "
+        f"min_apply_interval_s={args.min_apply_interval_s}"
     )
+
+    ws_kwargs = _ws_connect_kwargs(ws_connect, respect_proxy=bool(args.respect_proxy))
+    if "proxy" in ws_kwargs and ws_kwargs["proxy"] is None:
+        print("ws proxy disabled (pass --respect-proxy to override)")
 
     pending_edges: set[tuple[str, str]] | None = None
     pending_count = 0
     committed_edges: set[tuple[str, str]] | None = None
     applied_by_container: dict[str, dict[str, str]] = {}
     frame_idx = 0
+    last_apply_at = 0.0
+    min_apply_interval_s = max(0.0, float(args.min_apply_interval_s))
 
     while True:
         try:
-            async with ws_connect(args.ws_url, max_size=20_000_000) as ws:
+            async with ws_connect(args.ws_url, **ws_kwargs) as ws:
                 print(f"connected: {args.ws_url}")
                 async for raw in ws:
                     frame_idx += 1
@@ -562,6 +595,10 @@ async def run_controller(args: argparse.Namespace) -> int:
                         continue
                     if committed_edges is not None and edges == committed_edges:
                         continue
+                    now = time.monotonic()
+                    if committed_edges is not None and min_apply_interval_s > 0.0:
+                        if now - last_apply_at < min_apply_interval_s:
+                            continue
 
                     desired = desired_routes_from_edges(edges, entries)
                     applied_by_container, results = apply_routes_incremental(
@@ -587,6 +624,8 @@ async def run_controller(args: argparse.Namespace) -> int:
                             print(f"[error] container={res.container} msg={res.error}")
 
                     committed_edges = set(edges)
+                    if bad == 0:
+                        last_apply_at = now
                     if args.once:
                         return 0 if bad == 0 else 2
         except asyncio.CancelledError:  # pragma: no cover

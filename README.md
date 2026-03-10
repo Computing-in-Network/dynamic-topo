@@ -88,6 +88,11 @@ uv run python scripts/generate_topology_snapshot.py --output tests/fixtures/topo
 基于实时拓扑增量下发静态路由（300 容器）：
 
 ```bash
+# 先按当前容器前缀重建映射文件
+python3 scripts/generate_node_mapping.py \
+  --container-prefix star300lite_r_ \
+  --output docs/node_mapping_300.csv
+
 # 先演练，不实际写路由
 uv run python scripts/push_static_routes.py \
   --ws-url ws://127.0.0.1:8765 \
@@ -101,22 +106,29 @@ uv run python scripts/push_static_routes.py \
   --ws-url ws://127.0.0.1:8765 \
   --mapping-csv docs/node_mapping_300.csv \
   --container-ip-source docker \
-  --min-stable-frames 2
+  --min-stable-frames 2 \
+  --min-apply-interval-s 30
 ```
 
 - 路由为每节点 `/32` 目的前缀（默认 `10.200.0.0/16` 生成）
 - 仅做增量更新（`ip route replace` + 必要删除），避免每帧全量重灌
+- `--min-apply-interval-s` 用于限制连续重灌频率；动态拓扑建议先从 `30` 或 `60` 秒试起，不建议直接用 `300`
 - 容器 IP 可来自 CSV 扩展字段（`container_ip` 等）或 `docker inspect`
 - 当 `container_name` 失配时，脚本会自动尝试 `container_id`（若 CSV 提供）
 
-基于实时拓扑下发 `erv300_sim` 二层策略（`/opt/sim/policy.json`）：
+基于实时拓扑下发仿真器二层策略（`/opt/sim/policy.json`）：
 
 ```bash
+# 如容器前缀已切到 star300lite，先重建映射文件
+python3 scripts/generate_node_mapping.py \
+  --container-prefix star300lite_r_ \
+  --output docs/node_mapping_300.csv
+
 # 演练：仅生成策略并输出摘要，不写入仿真器
 uv run python scripts/push_sim_policy.py \
   --ws-url ws://127.0.0.1:8765 \
   --mapping-csv docs/node_mapping_300.csv \
-  --sim-container erv300_sim \
+  --sim-container auto \
   --sim-policy-path /opt/sim/policy.json \
   --min-stable-frames 2 \
   --dry-run --once
@@ -125,15 +137,46 @@ uv run python scripts/push_sim_policy.py \
 uv run python scripts/push_sim_policy.py \
   --ws-url ws://127.0.0.1:8765 \
   --mapping-csv docs/node_mapping_300.csv \
-  --sim-container erv300_sim \
+  --sim-container auto \
   --sim-policy-path /opt/sim/policy.json \
   --min-stable-frames 2 \
+  --min-apply-interval-s 30 \
   --once
 ```
 
 - 规则由实时 `links` 生成：每条边生成双向 `unicast/forward`
 - 通过 `veth_0` MAC 做节点映射，避免依赖容器 IP
+- `--sim-container auto` 会优先从映射里的 `*_r_<index>` 前缀推断 `*_sim`
 - 默认禁用 WS 代理（可加 `--respect-proxy` 覆盖）
+
+恢复 `star300lite_sim` 的 `sim_in/sim_out` 并重启仿真器：
+
+```bash
+python3 scripts/restore_sim_datapath.py \
+  --sim-container star300lite_sim \
+  --check-ovs \
+  --restart-sim
+```
+
+连续后台同步 `star300lite` 控制面：
+
+```bash
+# 默认以 30s 最小应用间隔常驻运行策略/路由控制器
+./scripts/start_star300lite_control_plane.sh
+
+# 如需同时由脚本管理 WS 推流源：
+START_STREAM_SERVER=1 ./scripts/start_star300lite_control_plane.sh
+
+# 如需调整节流参数：
+POLICY_APPLY_INTERVAL_S=30 ROUTE_APPLY_INTERVAL_S=30 ./scripts/start_star300lite_control_plane.sh
+
+# 停止由脚本拉起的后台控制器
+./scripts/stop_star300lite_control_plane.sh
+```
+
+- 后台日志与 pid 文件位于 `run/star300lite/`
+- 推荐起步参数：`POLICY_APPLY_INTERVAL_S=30`、`ROUTE_APPLY_INTERVAL_S=30`
+- 若观察到路由震荡或宿主机负载偏高，可先调到 `60`
 
 ## Git Flow 回退规范
 
