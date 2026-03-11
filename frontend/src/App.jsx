@@ -77,10 +77,12 @@ const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
 const DAMAGED_NODE_COLOR = Color.fromCssColorString('#ff595e');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 const FAULT_LINK_COLOR = Color.fromCssColorString('#ff3b30').withAlpha(0.95);
-const ROUTE_LINK_COLOR = Color.fromCssColorString('#80ffdb').withAlpha(0.96);
-const ROUTE_NODE_COLOR = Color.fromCssColorString('#72ddf7');
-const ROUTE_SRC_COLOR = Color.fromCssColorString('#c3f73a');
-const ROUTE_DST_COLOR = Color.fromCssColorString('#ffd166');
+const ROUTE_LINK_COLOR = Color.fromCssColorString('#fff36d').withAlpha(0.98);
+const ROUTE_NODE_COLOR = Color.fromCssColorString('#9bf6ff');
+const ROUTE_SRC_COLOR = Color.fromCssColorString('#a7f432');
+const ROUTE_DST_COLOR = Color.fromCssColorString('#ffb703');
+const DIM_LINK_ALPHA = 0.06;
+const DIM_NODE_ALPHA = 0.2;
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
@@ -88,6 +90,11 @@ const FRAME_QUEUE_MAX = 600;
 const SPEED_OPTIONS = [0.5, 1, 2];
 const ORBIT_UPDATE_INTERVAL_TICKS = 4;
 const ROUTE_SNAPSHOT_POLL_MS = 5000;
+const ROUTE_VIEW_MODES = [
+  { id: 'normal', label: '普通' },
+  { id: 'focus', label: '显示路由' },
+  { id: 'only', label: '只看路由' }
+];
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -452,6 +459,7 @@ export function App() {
     srcId: '',
     dstId: ''
   });
+  const [routeViewMode, setRouteViewMode] = useState('focus');
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -857,6 +865,7 @@ export function App() {
     () => new Set(routeAnalysis.pathEdgeKeys),
     [routeAnalysis.pathEdgeKeys]
   );
+  const hasRoutePath = routeAnalysis.status === 'ok' || routeAnalysis.status === 'same-node';
 
   const damagedNodeIds = new Set(
     faults
@@ -901,20 +910,25 @@ export function App() {
     const activeNodeIds = new Set();
     const nodePositionMap = new Map();
     const frameTick = Math.floor(frame.sim_time_s ?? 0);
+    const focusRoute = hasRoutePath && routeViewMode === 'focus';
+    const onlyRoute = hasRoutePath && routeViewMode === 'only';
 
     for (const node of frame.nodes) {
       activeNodeIds.add(node.id);
       const position = toCartesian(node);
       nodePositionMap.set(node.id, position);
       const color = typeColor[node.type] || Color.WHITE;
-      const nodeVisible = isNodeVisible(node, layerPrefs);
-      nodeVisibilityRef.current.set(node.id, nodeVisible);
 
       const selectedNode = selected?.kind === 'node' && selected.id === node.id;
       const isDamagedNode = damagedNodeIds.has(node.id);
       const isRouteSource = routeQuery.srcId === node.id;
       const isRouteTarget = routeQuery.dstId === node.id;
       const isRouteNode = routePathNodeIds.has(node.id);
+      const nodeVisible = onlyRoute
+        ? (isNodeVisible(node, layerPrefs) && (isRouteNode || selectedNode))
+        : isNodeVisible(node, layerPrefs);
+      nodeVisibilityRef.current.set(node.id, nodeVisible);
+      const shouldDimNode = focusRoute && !isRouteNode && !selectedNode;
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
       const labelScale = node.type === 'leo' ? 0.45 : 0.35;
@@ -952,17 +966,25 @@ export function App() {
       if (nodeEntity.billboard) {
         nodeEntity.billboard.scale = selectedNode
           ? 1.35
-          : (isRouteSource || isRouteTarget ? 1.26 : (isRouteNode ? 1.14 : 1.0));
+          : (isRouteSource || isRouteTarget ? 1.32 : (isRouteNode ? 1.18 : (shouldDimNode ? 0.84 : 1.0)));
         nodeEntity.billboard.color = isDamagedNode
-          ? DAMAGED_NODE_COLOR
+          ? (shouldDimNode ? DAMAGED_NODE_COLOR.withAlpha(0.45) : DAMAGED_NODE_COLOR)
           : (
             selectedNode
               ? SELECTED_NODE_COLOR
-              : (isRouteSource ? ROUTE_SRC_COLOR : (isRouteTarget ? ROUTE_DST_COLOR : (isRouteNode ? ROUTE_NODE_COLOR : color)))
+              : (
+                isRouteSource
+                  ? ROUTE_SRC_COLOR
+                  : (
+                    isRouteTarget
+                      ? ROUTE_DST_COLOR
+                      : (isRouteNode ? ROUTE_NODE_COLOR : (shouldDimNode ? color.withAlpha(DIM_NODE_ALPHA) : color))
+                  )
+              )
           );
       }
       if (nodeEntity.label) {
-        nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
+        nodeEntity.label.show = nodeVisible && layerPrefs.showLabels && (!focusRoute || isRouteNode || selectedNode);
       }
 
       const trail = trailPointsRef.current.get(node.id) || [];
@@ -1077,11 +1099,16 @@ export function App() {
       const positions = [pa, pb];
       const selectedLink = selected?.kind === 'link' && selected.id === linkId;
       const isRouteLink = routePathEdgeIds.has(edgeKey(edge.a, edge.b));
+      const shouldHideLink = onlyRoute && !isRouteLink && !selectedLink;
+      const shouldDimLink = focusRoute && !isRouteLink && !selectedLink;
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
       const linkKind = resolveLinkKind(a, b);
-      const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
+      const visible = !shouldHideLink
+        && isLinkVisible(linkKind, layerPrefs)
+        && isNodeVisible(a, layerPrefs)
+        && isNodeVisible(b, layerPrefs);
       linkState.set(linkId, {
         id: linkId,
         kind: linkKind,
@@ -1115,8 +1142,8 @@ export function App() {
       }
       const visual = linkVisualStateRef.current.get(linkId);
       const baseWidth = isRouteLink
-        ? Math.max(style.width + 1.5, 3.4)
-        : (linkFaulted ? Math.max(style.width, 2.8) : style.width);
+        ? Math.max(style.width + 3.0, 4.8)
+        : (shouldDimLink ? Math.max(style.width * 0.7, 0.8) : (linkFaulted ? Math.max(style.width, 2.8) : style.width));
       const expectedWidth = selectedLink ? baseWidth + 1.6 : baseWidth;
       const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
       if (widthChanged) {
@@ -1133,13 +1160,13 @@ export function App() {
           lineEntity.polyline.material = SELECTED_LINK_COLOR;
         } else if (linkFaulted) {
           lineEntity.polyline.material = new PolylineDashMaterialProperty({
-            color: FAULT_LINK_COLOR,
+            color: shouldDimLink ? FAULT_LINK_COLOR.withAlpha(0.25) : FAULT_LINK_COLOR,
             dashLength: 12
           });
         } else if (isRouteLink) {
           lineEntity.polyline.material = ROUTE_LINK_COLOR;
         } else {
-          lineEntity.polyline.material = style.color;
+          lineEntity.polyline.material = shouldDimLink ? style.color.withAlpha(DIM_LINK_ALPHA) : style.color;
         }
       }
       lineEntity.show = visible;
@@ -1189,7 +1216,13 @@ export function App() {
       activeFaultLinks.add(faultId);
       const selectedFault = selected?.kind === 'link' && selected.id === faultId;
       const linkKind = resolveLinkKind(a, b);
-      const visible = isLinkVisible(linkKind, layerPrefs) && isNodeVisible(a, layerPrefs) && isNodeVisible(b, layerPrefs);
+      const isRouteFaultLink = routePathEdgeIds.has(edgeKey(aId, bId));
+      const shouldHideFaultLink = onlyRoute && !isRouteFaultLink && !selectedFault;
+      const shouldDimFaultLink = focusRoute && !isRouteFaultLink && !selectedFault;
+      const visible = !shouldHideFaultLink
+        && isLinkVisible(linkKind, layerPrefs)
+        && isNodeVisible(a, layerPrefs)
+        && isNodeVisible(b, layerPrefs);
       let faultEntity = faultLinkEntitiesRef.current.get(faultId);
       if (!faultEntity) {
         faultEntity = entities.add({
@@ -1207,11 +1240,11 @@ export function App() {
       } else {
         faultEntity.polyline.positions = [pa, pb];
       }
-      faultEntity.polyline.width = selectedFault ? 4.2 : 2.8;
+      faultEntity.polyline.width = selectedFault ? 4.2 : (shouldDimFaultLink ? 1.3 : 2.8);
       faultEntity.polyline.material = selectedFault
         ? SELECTED_LINK_COLOR
         : new PolylineDashMaterialProperty({
-            color: FAULT_LINK_COLOR,
+            color: shouldDimFaultLink ? FAULT_LINK_COLOR.withAlpha(0.25) : FAULT_LINK_COLOR,
             dashLength: 12
           });
       faultEntity.show = visible;
@@ -1253,7 +1286,7 @@ export function App() {
         setSelected(null);
       }
     }
-  }, [frame, layerPrefs, selected, faults, routePathEdgeIds, routePathNodeIds, routeQuery]);
+  }, [frame, layerPrefs, selected, faults, routePathEdgeIds, routePathNodeIds, routeQuery, hasRoutePath, routeViewMode]);
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
@@ -1389,6 +1422,18 @@ export function App() {
               </select>
             </label>
           </div>
+          <div className="route-mode-row">
+            {ROUTE_VIEW_MODES.map((mode) => (
+              <button
+                type="button"
+                key={mode.id}
+                className={routeViewMode === mode.id ? 'active' : ''}
+                onClick={() => setRouteViewMode(mode.id)}
+              >
+                {mode.label}
+              </button>
+            ))}
+          </div>
           <div className="route-meta">
             <span className={`badge ${routeSnapshotStatus.available ? 'ok' : 'warn'}`}>
               快照 {routeSnapshotStatus.available ? '已加载' : '未加载'}
@@ -1415,6 +1460,7 @@ export function App() {
             <div>快照时间: {formatTimestamp(routeAnalysis.snapshotUpdatedAt || routeSnapshotStatus.fetchedAt)}</div>
             <div>已下发帧: {routeAnalysis.snapshotFrameIndex ?? '-'}</div>
             <div>已下发边数: {routeAnalysis.snapshotEdgeCount ?? '-'}</div>
+            <div>展示模式: {ROUTE_VIEW_MODES.find((mode) => mode.id === routeViewMode)?.label || '-'}</div>
           </div>
           {!routeSnapshotStatus.available && routeSnapshotStatus.error ? (
             <div className="route-empty">{routeSnapshotStatus.error}</div>
