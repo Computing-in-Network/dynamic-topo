@@ -70,6 +70,7 @@ class SimulationConfig:
     enforce_ship_ocean_mask: bool = True
     link_policy_path: str | None = None
     link_policy_hot_reload: bool = False
+    route_snapshot_path: str | None = None
     incremental_geometry: bool = False
     incremental_move_threshold_m: float = 1e-6
     incremental_rebuild_ratio: float = 0.35

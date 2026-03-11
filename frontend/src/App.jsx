@@ -77,12 +77,17 @@ const SELECTED_NODE_COLOR = Color.fromCssColorString('#fff176');
 const DAMAGED_NODE_COLOR = Color.fromCssColorString('#ff595e');
 const SELECTED_LINK_COLOR = Color.fromCssColorString('#f94144').withAlpha(0.95);
 const FAULT_LINK_COLOR = Color.fromCssColorString('#ff3b30').withAlpha(0.95);
+const ROUTE_LINK_COLOR = Color.fromCssColorString('#80ffdb').withAlpha(0.96);
+const ROUTE_NODE_COLOR = Color.fromCssColorString('#72ddf7');
+const ROUTE_SRC_COLOR = Color.fromCssColorString('#c3f73a');
+const ROUTE_DST_COLOR = Color.fromCssColorString('#ffd166');
 const STALE_WARN_MS = 2500;
 const STALE_ERROR_MS = 5000;
 const INGEST_FPS_WARN = 0.7;
 const FRAME_QUEUE_MAX = 600;
 const SPEED_OPTIONS = [0.5, 1, 2];
 const ORBIT_UPDATE_INTERVAL_TICKS = 4;
+const ROUTE_SNAPSHOT_POLL_MS = 5000;
 
 function svgDataUri(svg) {
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
@@ -201,6 +206,139 @@ function edgeKey(a, b) {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
 }
 
+function labelForNode(node) {
+  if (!node) {
+    return '';
+  }
+  return node.name || node.id || node.node_id || '';
+}
+
+function compareNodeLabels(a, b) {
+  return labelForNode(a).localeCompare(labelForNode(b), undefined, {
+    numeric: true,
+    sensitivity: 'base'
+  });
+}
+
+function buildRouteAnalysis(routeSnapshot, srcId, dstId) {
+  const empty = {
+    status: 'idle',
+    source: null,
+    target: null,
+    firstHop: null,
+    pathIds: [],
+    pathNodes: [],
+    pathEdgeKeys: [],
+    componentSize: 0,
+    hopCount: 0,
+    snapshotUpdatedAt: null,
+    snapshotFrameIndex: null,
+    snapshotEdgeCount: null
+  };
+  if (!routeSnapshot || !srcId || !dstId) {
+    return empty;
+  }
+  const nodes = routeSnapshot.nodes && typeof routeSnapshot.nodes === 'object' ? routeSnapshot.nodes : {};
+  const routes = routeSnapshot.routes && typeof routeSnapshot.routes === 'object' ? routeSnapshot.routes : {};
+  const componentSizes =
+    routeSnapshot.component_sizes && typeof routeSnapshot.component_sizes === 'object'
+      ? routeSnapshot.component_sizes
+      : {};
+  const source = nodes[srcId] || null;
+  const target = nodes[dstId] || null;
+  const base = {
+    ...empty,
+    snapshotUpdatedAt: routeSnapshot.updated_at || null,
+    snapshotFrameIndex: routeSnapshot.frame_index ?? null,
+    snapshotEdgeCount: routeSnapshot.edge_count ?? null
+  };
+  if (!source || !target) {
+    return {
+      ...base,
+      status: 'missing',
+      source,
+      target
+    };
+  }
+  if (srcId === dstId) {
+    return {
+      ...base,
+      status: 'same-node',
+      source,
+      target,
+      pathIds: [srcId],
+      pathNodes: [source],
+      componentSize: 1
+    };
+  }
+
+  const maxHops = Math.max(1, Number(routeSnapshot.node_count) || Object.keys(nodes).length || 300);
+  const pathIds = [srcId];
+  const seen = new Set(pathIds);
+  let current = srcId;
+  let firstHop = null;
+  for (let step = 0; step < maxHops; step += 1) {
+    if (current === dstId) {
+      break;
+    }
+    const currentRoutes = routes[current];
+    const hop = currentRoutes && typeof currentRoutes === 'object' ? currentRoutes[dstId] : null;
+    if (!hop || typeof hop.next_hop_node !== 'string' || !hop.next_hop_node) {
+      return {
+        ...base,
+        status: 'unreachable',
+        source,
+        target,
+        componentSize: Number(componentSizes[srcId]) || 0
+      };
+    }
+    const nextId = hop.next_hop_node;
+    if (!firstHop) {
+      firstHop = nodes[nextId] || { node_id: nextId, id: nextId };
+    }
+    if (seen.has(nextId)) {
+      return {
+        ...base,
+        status: 'loop',
+        source,
+        target,
+        firstHop,
+        pathIds,
+        pathNodes: pathIds.map((id) => nodes[id] || { node_id: id, id }),
+        componentSize: Number(componentSizes[srcId]) || 0
+      };
+    }
+    pathIds.push(nextId);
+    seen.add(nextId);
+    current = nextId;
+  }
+
+  if (current !== dstId) {
+    return {
+      ...base,
+      status: 'unreachable',
+      source,
+      target,
+      firstHop,
+      componentSize: Number(componentSizes[srcId]) || 0
+    };
+  }
+  const pathNodes = pathIds.map((id) => nodes[id] || { node_id: id, id });
+  const pathEdgeKeys = pathIds.slice(1).map((id, idx) => edgeKey(pathIds[idx], id));
+  return {
+    ...base,
+    status: 'ok',
+    source,
+    target,
+    firstHop: firstHop || pathNodes[1] || null,
+    pathIds,
+    pathNodes,
+    pathEdgeKeys,
+    componentSize: Number(componentSizes[srcId]) || 0,
+    hopCount: Math.max(0, pathIds.length - 1)
+  };
+}
+
 function formatPercentFromRatio(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return '-';
@@ -304,6 +442,16 @@ export function App() {
     error: '',
     fetchedAt: null
   });
+  const [routeSnapshot, setRouteSnapshot] = useState(null);
+  const [routeSnapshotStatus, setRouteSnapshotStatus] = useState({
+    available: false,
+    error: '',
+    fetchedAt: null
+  });
+  const [routeQuery, setRouteQuery] = useState({
+    srcId: '',
+    dstId: ''
+  });
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -369,6 +517,14 @@ export function App() {
   function sendControl(action, extra = {}) {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (action === 'route_snapshot') {
+        setRouteSnapshotStatus((prev) => ({
+          ...prev,
+          available: false,
+          error: '控制通道未连接'
+        }));
+        return;
+      }
       setControlStatus('控制通道未连接');
       return;
     }
@@ -536,15 +692,42 @@ export function App() {
     };
     ws.onclose = () => {
       setConnected(false);
+      setRouteSnapshotStatus((prev) => ({
+        ...prev,
+        available: false,
+        error: prev.fetchedAt ? 'WebSocket 已断开，展示的是最后一次已获取快照' : 'WebSocket 已断开'
+      }));
       wsRef.current = null;
     };
     ws.onerror = () => {
       setConnected(false);
+      setRouteSnapshotStatus((prev) => ({
+        ...prev,
+        available: false,
+        error: prev.fetchedAt ? 'WebSocket 异常，展示的是最后一次已获取快照' : 'WebSocket 异常'
+      }));
       wsRef.current = null;
     };
     ws.onmessage = (evt) => {
       const payload = JSON.parse(evt.data);
       if (payload && payload.type === 'control_ack') {
+        if (payload.action === 'route_snapshot') {
+          if (payload.ok && payload.route_snapshot) {
+            setRouteSnapshot(payload.route_snapshot);
+            setRouteSnapshotStatus({
+              available: true,
+              error: '',
+              fetchedAt: new Date().toISOString()
+            });
+          } else {
+            setRouteSnapshotStatus((prev) => ({
+              available: false,
+              error: payload.error || 'route snapshot unavailable',
+              fetchedAt: prev.fetchedAt
+            }));
+          }
+          return;
+        }
         if (Array.isArray(payload.faults)) {
           setFaults(payload.faults);
         }
@@ -569,6 +752,17 @@ export function App() {
       ws.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (!connected) {
+      return undefined;
+    }
+    sendControl('route_snapshot');
+    const timer = window.setInterval(() => {
+      sendControl('route_snapshot');
+    }, ROUTE_SNAPSHOT_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [connected]);
 
   useEffect(() => {
     let stopped = false;
@@ -624,6 +818,46 @@ export function App() {
     };
   }, []);
 
+  const routeNodeOptions = useMemo(() => {
+    if (!frame?.nodes) {
+      return [];
+    }
+    return [...frame.nodes]
+      .filter((node) => node.type === 'leo')
+      .sort(compareNodeLabels);
+  }, [frame]);
+
+  useEffect(() => {
+    if (routeNodeOptions.length === 0) {
+      return;
+    }
+    setRouteQuery((prev) => {
+      const knownIds = new Set(routeNodeOptions.map((node) => node.id));
+      const srcId = knownIds.has(prev.srcId) ? prev.srcId : routeNodeOptions[0].id;
+      let dstId = knownIds.has(prev.dstId) ? prev.dstId : '';
+      if (!dstId || dstId === srcId) {
+        dstId = routeNodeOptions.find((node) => node.id !== srcId)?.id || srcId;
+      }
+      if (srcId === prev.srcId && dstId === prev.dstId) {
+        return prev;
+      }
+      return { srcId, dstId };
+    });
+  }, [routeNodeOptions]);
+
+  const routeAnalysis = useMemo(
+    () => buildRouteAnalysis(routeSnapshot, routeQuery.srcId, routeQuery.dstId),
+    [routeSnapshot, routeQuery]
+  );
+  const routePathNodeIds = useMemo(
+    () => new Set(routeAnalysis.pathIds),
+    [routeAnalysis.pathIds]
+  );
+  const routePathEdgeIds = useMemo(
+    () => new Set(routeAnalysis.pathEdgeKeys),
+    [routeAnalysis.pathEdgeKeys]
+  );
+
   const damagedNodeIds = new Set(
     faults
       .filter((f) => f.fault_type === 'DAMAGED' && f.target?.node_id)
@@ -678,6 +912,9 @@ export function App() {
 
       const selectedNode = selected?.kind === 'node' && selected.id === node.id;
       const isDamagedNode = damagedNodeIds.has(node.id);
+      const isRouteSource = routeQuery.srcId === node.id;
+      const isRouteTarget = routeQuery.dstId === node.id;
+      const isRouteNode = routePathNodeIds.has(node.id);
       let nodeEntity = nodeEntitiesRef.current.get(node.id);
       const labelText = node.name || node.id;
       const labelScale = node.type === 'leo' ? 0.45 : 0.35;
@@ -713,10 +950,16 @@ export function App() {
       }
       nodeEntity.show = nodeVisible;
       if (nodeEntity.billboard) {
-        nodeEntity.billboard.scale = selectedNode ? 1.35 : 1.0;
+        nodeEntity.billboard.scale = selectedNode
+          ? 1.35
+          : (isRouteSource || isRouteTarget ? 1.26 : (isRouteNode ? 1.14 : 1.0));
         nodeEntity.billboard.color = isDamagedNode
           ? DAMAGED_NODE_COLOR
-          : (selectedNode ? SELECTED_NODE_COLOR : color);
+          : (
+            selectedNode
+              ? SELECTED_NODE_COLOR
+              : (isRouteSource ? ROUTE_SRC_COLOR : (isRouteTarget ? ROUTE_DST_COLOR : (isRouteNode ? ROUTE_NODE_COLOR : color)))
+          );
       }
       if (nodeEntity.label) {
         nodeEntity.label.show = nodeVisible && layerPrefs.showLabels;
@@ -833,6 +1076,7 @@ export function App() {
       }
       const positions = [pa, pb];
       const selectedLink = selected?.kind === 'link' && selected.id === linkId;
+      const isRouteLink = routePathEdgeIds.has(edgeKey(edge.a, edge.b));
 
       let lineEntity = linkEntitiesRef.current.get(linkId);
       const style = resolveLinkStyle(a, b);
@@ -863,19 +1107,27 @@ export function App() {
           width: style.width,
           selected: selectedLink,
           kind: linkKind,
-          fault: linkFaulted
+          fault: linkFaulted,
+          route: isRouteLink
         });
       } else {
         lineEntity.polyline.positions = positions;
       }
       const visual = linkVisualStateRef.current.get(linkId);
-      const baseWidth = linkFaulted ? Math.max(style.width, 2.8) : style.width;
+      const baseWidth = isRouteLink
+        ? Math.max(style.width + 1.5, 3.4)
+        : (linkFaulted ? Math.max(style.width, 2.8) : style.width);
       const expectedWidth = selectedLink ? baseWidth + 1.6 : baseWidth;
       const widthChanged = !visual || visual.width !== expectedWidth || visual.selected !== selectedLink;
       if (widthChanged) {
         lineEntity.polyline.width = expectedWidth;
       }
-      const materialChanged = !visual || visual.selected !== selectedLink || visual.kind !== linkKind || visual.fault !== linkFaulted;
+      const materialChanged =
+        !visual ||
+        visual.selected !== selectedLink ||
+        visual.kind !== linkKind ||
+        visual.fault !== linkFaulted ||
+        visual.route !== isRouteLink;
       if (materialChanged) {
         if (selectedLink) {
           lineEntity.polyline.material = SELECTED_LINK_COLOR;
@@ -884,6 +1136,8 @@ export function App() {
             color: FAULT_LINK_COLOR,
             dashLength: 12
           });
+        } else if (isRouteLink) {
+          lineEntity.polyline.material = ROUTE_LINK_COLOR;
         } else {
           lineEntity.polyline.material = style.color;
         }
@@ -893,7 +1147,8 @@ export function App() {
         width: expectedWidth,
         selected: selectedLink,
         kind: linkKind,
-        fault: linkFaulted
+        fault: linkFaulted,
+        route: isRouteLink
       });
     }
 
@@ -998,7 +1253,7 @@ export function App() {
         setSelected(null);
       }
     }
-  }, [frame, layerPrefs, selected, faults]);
+  }, [frame, layerPrefs, selected, faults, routePathEdgeIds, routePathNodeIds, routeQuery]);
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
@@ -1093,10 +1348,117 @@ export function App() {
             ))
           )}
         </div>
+        <div className="route-panel">
+          <div className="layer-header">
+            <span>静态路由演示</span>
+            <button
+              type="button"
+              onClick={() => setRouteQuery((prev) => ({ srcId: prev.dstId, dstId: prev.srcId }))}
+            >
+              交换
+            </button>
+          </div>
+          <div className="route-hint">
+            面板读取的是路由控制器最近一次成功下发的只读快照，不再使用前端本地重算结果。
+          </div>
+          <div className="route-grid">
+            <label>
+              <span>起点</span>
+              <select
+                value={routeQuery.srcId}
+                onChange={(evt) => setRouteQuery((prev) => ({ ...prev, srcId: evt.target.value }))}
+              >
+                {routeNodeOptions.map((node) => (
+                  <option key={`src-${node.id}`} value={node.id}>
+                    {labelForNode(node)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>终点</span>
+              <select
+                value={routeQuery.dstId}
+                onChange={(evt) => setRouteQuery((prev) => ({ ...prev, dstId: evt.target.value }))}
+              >
+                {routeNodeOptions.map((node) => (
+                  <option key={`dst-${node.id}`} value={node.id}>
+                    {labelForNode(node)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="route-meta">
+            <span className={`badge ${routeSnapshotStatus.available ? 'ok' : 'warn'}`}>
+              快照 {routeSnapshotStatus.available ? '已加载' : '未加载'}
+            </span>
+            <span className={`badge ${
+              routeAnalysis.status === 'ok' || routeAnalysis.status === 'same-node'
+                ? 'ok'
+                : (routeAnalysis.status === 'unreachable' || routeAnalysis.status === 'loop' ? 'error' : 'warn')
+            }`}>
+              {routeAnalysis.status === 'ok'
+                ? '当前可达'
+                : routeAnalysis.status === 'same-node'
+                  ? '同一节点'
+                  : routeAnalysis.status === 'unreachable'
+                    ? '当前不可达'
+                    : routeAnalysis.status === 'loop'
+                      ? '路由异常'
+                    : '等待路径'}
+            </span>
+            <span className="badge ok">连通分量 {routeAnalysis.componentSize}</span>
+            <span className="badge ok">跳数 {routeAnalysis.hopCount}</span>
+          </div>
+          <div className="route-summary">
+            <div>快照时间: {formatTimestamp(routeAnalysis.snapshotUpdatedAt || routeSnapshotStatus.fetchedAt)}</div>
+            <div>已下发帧: {routeAnalysis.snapshotFrameIndex ?? '-'}</div>
+            <div>已下发边数: {routeAnalysis.snapshotEdgeCount ?? '-'}</div>
+          </div>
+          {!routeSnapshotStatus.available && routeSnapshotStatus.error ? (
+            <div className="route-empty">{routeSnapshotStatus.error}</div>
+          ) : null}
+          {routeAnalysis.status === 'unreachable' ? (
+            <div className="route-empty">
+              当前两点不在同一连通分量，控制器不会为这对节点下发到达终点的静态路由。
+            </div>
+          ) : null}
+          {routeAnalysis.status === 'loop' ? (
+            <div className="route-empty">
+              最近一次已下发快照里检测到路径环路，这说明控制器状态异常，需要先检查 `push_static_routes.py` 日志。
+            </div>
+          ) : null}
+          {(routeAnalysis.status === 'ok' || routeAnalysis.status === 'same-node') ? (
+            <>
+              <div className="route-summary">
+                <div>起点: {labelForNode(routeAnalysis.source)}</div>
+                <div>终点: {labelForNode(routeAnalysis.target)}</div>
+                <div>第一跳: {routeAnalysis.firstHop ? labelForNode(routeAnalysis.firstHop) : '-'}</div>
+              </div>
+              <div className="route-path-strip">
+                {routeAnalysis.pathNodes.map((node, idx) => (
+                  <span
+                    key={`route-hop-${node.id}`}
+                    className={`route-pill ${
+                      idx === 0
+                        ? 'src'
+                        : (idx === routeAnalysis.pathNodes.length - 1 ? 'dst' : 'mid')
+                    }`}
+                  >
+                    {idx > 0 ? <span className="route-arrow">→</span> : null}
+                    {labelForNode(node)}
+                  </span>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </div>
         <div className="legend">
           <div className="legend-item"><span className="swatch orbit" />satellite orbit</div>
           <div className="legend-item"><span className="swatch sat-sat" />satellite-satellite link</div>
           <div className="legend-item"><span className="swatch sat-mobile" />satellite-air/ship link</div>
+          <div className="legend-item"><span className="swatch route" />static route highlight</div>
         </div>
         <div className="layer-panel">
           <div className="layer-header">
@@ -1197,6 +1559,16 @@ export function App() {
               <button type="button" onClick={() => sendControl('inject_node_fault', { node_id: selectedNode.id })}>
                 注入节点故障
               </button>
+              {selectedNode.type === 'leo' ? (
+                <>
+                  <button type="button" onClick={() => setRouteQuery((prev) => ({ ...prev, srcId: selectedNode.id }))}>
+                    设为路由起点
+                  </button>
+                  <button type="button" onClick={() => setRouteQuery((prev) => ({ ...prev, dstId: selectedNode.id }))}>
+                    设为路由终点
+                  </button>
+                </>
+              ) : null}
             </div>
           </div>
         ) : null}

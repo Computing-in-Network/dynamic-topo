@@ -14,6 +14,7 @@ import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 @dataclass(frozen=True)
@@ -33,6 +34,13 @@ class ApplyResult:
     upserts: int
     deletes: int
     error: str = ""
+
+
+@dataclass(frozen=True)
+class RouteHop:
+    next_hop_node: str
+    next_hop_ip: str
+    dst_prefix: str
 
 
 def resolve_ws_connect():
@@ -100,6 +108,11 @@ def parse_args() -> argparse.Namespace:
         help="Allow websockets client to use proxy env vars (default: disable proxy for WS)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print commands only, do not execute")
+    parser.add_argument(
+        "--state-output",
+        default="",
+        help="Optional JSON path to persist the latest successfully applied route snapshot",
+    )
     parser.add_argument(
         "--once",
         action="store_true",
@@ -408,7 +421,7 @@ def _bfs_first_hop(src: str, neighbors: dict[str, set[str]]) -> dict[str, str]:
 def desired_routes_from_edges(
     edges: set[tuple[str, str]],
     entries: list[NodeEntry],
-) -> dict[str, dict[str, str]]:
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, RouteHop]], dict[str, int]]:
     by_node: dict[str, NodeEntry] = {e.node_id: e for e in entries}
     neighbors: dict[str, set[str]] = {e.node_id: set() for e in entries}
     for a, b in edges:
@@ -416,10 +429,13 @@ def desired_routes_from_edges(
         neighbors[b].add(a)
 
     desired: dict[str, dict[str, str]] = {}
+    route_hops: dict[str, dict[str, RouteHop]] = {}
+    component_sizes: dict[str, int] = {}
     node_ids = sorted(by_node.keys())
     for src in node_ids:
         first = _bfs_first_hop(src, neighbors)
         routes: dict[str, str] = {}
+        hop_map: dict[str, RouteHop] = {}
         for dst in node_ids:
             if dst == src:
                 continue
@@ -429,8 +445,68 @@ def desired_routes_from_edges(
             dst_prefix = by_node[dst].loopback_prefix
             nh_ip = by_node[nh_node].container_ip
             routes[dst_prefix] = nh_ip
+            hop_map[dst] = RouteHop(next_hop_node=nh_node, next_hop_ip=nh_ip, dst_prefix=dst_prefix)
         desired[src] = routes
-    return desired
+        route_hops[src] = hop_map
+        component_sizes[src] = len(first) + 1
+    return desired, route_hops, component_sizes
+
+
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def _build_route_state_snapshot(
+    *,
+    entries: list[NodeEntry],
+    route_hops_by_node: dict[str, dict[str, RouteHop]],
+    component_sizes: dict[str, int],
+    frame_idx: int,
+    edge_count: int,
+    upserts: int,
+    deletes: int,
+) -> dict:
+    node_payload = {
+        entry.node_id: {
+            "node_id": entry.node_id,
+            "node_index": entry.node_index,
+            "container_name": entry.container_name,
+            "container_exec": entry.container_exec,
+            "container_ip": entry.container_ip,
+            "loopback_prefix": entry.loopback_prefix,
+        }
+        for entry in entries
+    }
+    route_payload: dict[str, dict[str, dict[str, str]]] = {}
+    for src, hops in route_hops_by_node.items():
+        route_payload[src] = {
+            dst: {
+                "next_hop_node": hop.next_hop_node,
+                "next_hop_ip": hop.next_hop_ip,
+                "dst_prefix": hop.dst_prefix,
+            }
+            for dst, hop in hops.items()
+        }
+
+    return {
+        "schema": "dynamic_topo.route_snapshot.v1",
+        "updated_at": _iso_utc_now(),
+        "frame_index": frame_idx,
+        "edge_count": edge_count,
+        "node_count": len(entries),
+        "route_upserts": upserts,
+        "route_deletes": deletes,
+        "component_sizes": component_sizes,
+        "nodes": node_payload,
+        "routes": route_payload,
+    }
 
 
 def _render_route_cmd(prefix: str, nexthop_ip: str, route_dev: str) -> str:
@@ -549,10 +625,12 @@ async def run_controller(args: argparse.Namespace) -> int:
     ws_connect = resolve_ws_connect()
     entries = load_node_entries(args)
     known_nodes = {e.node_id for e in entries}
+    state_output = Path(args.state_output).expanduser() if str(args.state_output).strip() else None
     print(
         f"loaded nodes={len(entries)} ws={args.ws_url} source={args.container_ip_source} "
         f"dry_run={args.dry_run} min_stable_frames={args.min_stable_frames} "
-        f"min_apply_interval_s={args.min_apply_interval_s}"
+        f"min_apply_interval_s={args.min_apply_interval_s} "
+        f"state_output={state_output or '-'}"
     )
 
     ws_kwargs = _ws_connect_kwargs(ws_connect, respect_proxy=bool(args.respect_proxy))
@@ -591,7 +669,8 @@ async def run_controller(args: argparse.Namespace) -> int:
                     else:
                         pending_count += 1
 
-                    if pending_count < max(1, int(args.min_stable_frames)):
+                    required_stable_frames = 1 if committed_edges is None else max(1, int(args.min_stable_frames))
+                    if pending_count < required_stable_frames:
                         continue
                     if committed_edges is not None and edges == committed_edges:
                         continue
@@ -600,7 +679,7 @@ async def run_controller(args: argparse.Namespace) -> int:
                         if now - last_apply_at < min_apply_interval_s:
                             continue
 
-                    desired = desired_routes_from_edges(edges, entries)
+                    desired, route_hops, component_sizes = desired_routes_from_edges(edges, entries)
                     applied_by_container, results = apply_routes_incremental(
                         desired_by_node=desired,
                         entries=entries,
@@ -626,6 +705,17 @@ async def run_controller(args: argparse.Namespace) -> int:
                     committed_edges = set(edges)
                     if bad == 0:
                         last_apply_at = now
+                        if state_output is not None and not args.dry_run:
+                            snapshot = _build_route_state_snapshot(
+                                entries=entries,
+                                route_hops_by_node=route_hops,
+                                component_sizes=component_sizes,
+                                frame_idx=frame_idx,
+                                edge_count=len(edges),
+                                upserts=upserts,
+                                deletes=deletes,
+                            )
+                            _write_json_atomic(state_output, snapshot)
                     if args.once:
                         return 0 if bad == 0 else 2
         except asyncio.CancelledError:  # pragma: no cover

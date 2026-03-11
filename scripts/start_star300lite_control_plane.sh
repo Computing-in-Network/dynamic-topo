@@ -18,6 +18,7 @@ STREAM_PORT="${STREAM_PORT:-8765}"
 STREAM_DT="${STREAM_DT:-1.0}"
 
 RUN_DIR="${RUN_DIR:-$ROOT_DIR/run/star300lite}"
+ROUTE_SNAPSHOT_PATH="${ROUTE_SNAPSHOT_PATH:-$RUN_DIR/route_snapshot.json}"
 mkdir -p "$RUN_DIR"
 
 start_bg() {
@@ -82,7 +83,8 @@ if [[ "$START_STREAM_SERVER" == "1" ]]; then
     "$PYTHON_BIN" -u -m dynamic_topo.stream_server \
     --host "$STREAM_HOST" \
     --port "$STREAM_PORT" \
-    --dt "$STREAM_DT"
+    --dt "$STREAM_DT" \
+    --route-snapshot "$ROUTE_SNAPSHOT_PATH"
 fi
 
 start_bg "push_sim_policy" \
@@ -100,6 +102,7 @@ start_bg "push_static_routes" \
   --mapping-csv "$MAPPING_CSV" \
   --container-ip-source docker \
   --min-stable-frames "$MIN_STABLE_FRAMES" \
-  --min-apply-interval-s "$ROUTE_APPLY_INTERVAL_S"
+  --min-apply-interval-s "$ROUTE_APPLY_INTERVAL_S" \
+  --state-output "$ROUTE_SNAPSHOT_PATH"
 
 echo "run_dir=$RUN_DIR"
