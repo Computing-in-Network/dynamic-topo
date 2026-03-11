@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Cartesian2,
   Cartesian3,
@@ -21,6 +21,16 @@ const defaultWsUrl = (() => {
   return `${scheme}://${window.location.hostname}:8765`;
 })();
 const WS_URL = import.meta.env.VITE_TOPO_WS_URL || defaultWsUrl;
+const defaultMonitorBaseUrl = `${window.location.protocol}//${window.location.hostname}:9010`;
+const MONITOR_BASE_URL = (import.meta.env.VITE_MONITOR_BASE_URL || defaultMonitorBaseUrl).replace(/\/$/, '');
+const MONITOR_TOPOLOGY_EPOCH = import.meta.env.VITE_MONITOR_TOPOLOGY_EPOCH || '';
+const MONITOR_POLL_MS = (() => {
+  const parsed = Number(import.meta.env.VITE_MONITOR_POLL_MS || 2000);
+  if (!Number.isFinite(parsed) || parsed < 1000) {
+    return 2000;
+  }
+  return Math.floor(parsed);
+})();
 const LAYER_PREFS_KEY = 'topo_layer_prefs_v1';
 const TRAIL_LEN_BY_TYPE = {
   leo: 180,
@@ -191,6 +201,87 @@ function edgeKey(a, b) {
   return a < b ? `${a}|${b}` : `${b}|${a}`;
 }
 
+function formatPercentFromRatio(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatFixed(value, digits = 2) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  return value.toFixed(digits);
+}
+
+function formatBps(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return '-';
+  }
+  const abs = Math.abs(value);
+  if (abs < 1_000) {
+    return `${value.toFixed(0)} bps`;
+  }
+  if (abs < 1_000_000) {
+    return `${(value / 1_000).toFixed(1)} Kbps`;
+  }
+  if (abs < 1_000_000_000) {
+    return `${(value / 1_000_000).toFixed(1)} Mbps`;
+  }
+  return `${(value / 1_000_000_000).toFixed(2)} Gbps`;
+}
+
+function formatTimestamp(value) {
+  if (typeof value !== 'string' || !value) {
+    return '-';
+  }
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) {
+    return value;
+  }
+  return new Date(ts).toLocaleString();
+}
+
+function resolveNodeMetric(nodesMap, nodeId) {
+  if (!nodesMap || !nodeId) {
+    return null;
+  }
+  if (nodesMap[nodeId]) {
+    return nodesMap[nodeId];
+  }
+  for (const payload of Object.values(nodesMap)) {
+    if (!payload || typeof payload !== 'object') {
+      continue;
+    }
+    if (payload.node_uid === nodeId || payload.node_id === nodeId || payload.docker_name === nodeId) {
+      return payload;
+    }
+  }
+  return null;
+}
+
+function resolveLinkMetric(linksMap, link) {
+  if (!linksMap || !link?.a?.id || !link?.b?.id) {
+    return null;
+  }
+  const targetKey = edgeKey(link.a.id, link.b.id);
+  for (const payload of Object.values(linksMap)) {
+    if (!payload || typeof payload !== 'object') {
+      continue;
+    }
+    const src = payload.src_node_id || payload.src_node_uid;
+    const dst = payload.dst_node_id || payload.dst_node_uid;
+    if (typeof src === 'string' && typeof dst === 'string' && edgeKey(src, dst) === targetKey) {
+      return payload;
+    }
+    if (payload.link_id === link.id || payload.link_uid === link.id) {
+      return payload;
+    }
+  }
+  return null;
+}
+
 export function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
@@ -207,6 +298,12 @@ export function App() {
   const [queueDepth, setQueueDepth] = useState(0);
   const [faults, setFaults] = useState([]);
   const [controlStatus, setControlStatus] = useState('');
+  const [monitorSnapshot, setMonitorSnapshot] = useState(null);
+  const [monitorStatus, setMonitorStatus] = useState({
+    connected: false,
+    error: '',
+    fetchedAt: null
+  });
   const [layerPrefs, setLayerPrefs] = useState(() => {
     try {
       const raw = window.localStorage.getItem(LAYER_PREFS_KEY);
@@ -470,6 +567,60 @@ export function App() {
     return () => {
       wsRef.current = null;
       ws.close();
+    };
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = null;
+    const query = new URLSearchParams();
+    if (MONITOR_TOPOLOGY_EPOCH) {
+      query.set('topology_epoch', MONITOR_TOPOLOGY_EPOCH);
+    }
+    const queryStr = query.toString();
+    const snapshotUrl = `${MONITOR_BASE_URL}/api/v1/monitor/snapshot${queryStr ? `?${queryStr}` : ''}`;
+
+    async function pullSnapshot() {
+      try {
+        const resp = await fetch(snapshotUrl, {
+          method: 'GET',
+          headers: {
+            Accept: 'application/json'
+          }
+        });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const payload = await resp.json();
+        if (stopped) {
+          return;
+        }
+        setMonitorSnapshot(payload);
+        setMonitorStatus({
+          connected: true,
+          error: '',
+          fetchedAt: new Date().toISOString()
+        });
+      } catch (err) {
+        if (stopped) {
+          return;
+        }
+        setMonitorStatus((prev) => ({
+          connected: false,
+          error: String(err?.message || err || 'fetch failed'),
+          fetchedAt: prev.fetchedAt
+        }));
+      }
+    }
+
+    pullSnapshot();
+    timer = window.setInterval(pullSnapshot, MONITOR_POLL_MS);
+
+    return () => {
+      stopped = true;
+      if (timer) {
+        window.clearInterval(timer);
+      }
     };
   }, []);
 
@@ -851,6 +1002,19 @@ export function App() {
 
   const selectedNode = selected?.kind === 'node' ? nodeStateRef.current.get(selected.id) : null;
   const selectedLink = selected?.kind === 'link' ? linkStateRef.current.get(selected.id) : null;
+  const monitorData = monitorSnapshot?.monitor || null;
+  const monitorNodes = monitorData?.nodes || null;
+  const monitorLinks = monitorData?.links || null;
+  const monitorNodeCount = monitorNodes ? Object.keys(monitorNodes).length : 0;
+  const monitorLinkCount = monitorLinks ? Object.keys(monitorLinks).length : 0;
+  const selectedNodeMetric = useMemo(
+    () => resolveNodeMetric(monitorNodes, selectedNode?.id),
+    [monitorNodes, selectedNode]
+  );
+  const selectedLinkMetric = useMemo(
+    () => resolveLinkMetric(monitorLinks, selectedLink),
+    [monitorLinks, selectedLink]
+  );
   const alerts = [];
   if (!connected) {
     alerts.push({ level: 'error', text: 'WebSocket 已断开' });
@@ -877,6 +1041,9 @@ export function App() {
           <span className={`badge ${runtimeHealth.ingestFps > 0 && runtimeHealth.ingestFps < INGEST_FPS_WARN ? 'warn' : 'ok'}`}>
             帧率 {runtimeHealth.ingestFps.toFixed(2)}fps
           </span>
+          <span className={`badge ${monitorStatus.connected ? 'ok' : 'warn'}`}>
+            监控 {monitorStatus.connected ? '已接入' : '未连接'}
+          </span>
         </div>
         <div className="time-controls">
           <button type="button" onClick={() => setPlayback((p) => ({ ...p, paused: !p.paused }))}>
@@ -896,6 +1063,14 @@ export function App() {
           <span className="queue-chip">缓冲 {queueDepth}</span>
         </div>
         <p>WS: {WS_URL}</p>
+        <p>Monitor: {MONITOR_BASE_URL}</p>
+        <p>monitor nodes: {monitorNodeCount}</p>
+        <p>monitor links: {monitorLinkCount}</p>
+        <p>monitor epoch: {monitorData?.topology_epoch || '-'}</p>
+        <p>monitor updated: {formatTimestamp(monitorData?.updated_at || monitorStatus.fetchedAt)}</p>
+        {!monitorStatus.connected && monitorStatus.error ? (
+          <p>monitor error: {monitorStatus.error}</p>
+        ) : null}
         <p>t: {frame ? frame.sim_time_s.toFixed(1) : '-'} s</p>
         <p>nodes: {frame ? frame.nodes.length : 0}</p>
         <p>links: {frame ? frame.metrics.edge_count : 0}</p>
@@ -1004,6 +1179,20 @@ export function App() {
             <div>经度: {selectedNode.lon.toFixed(3)}</div>
             <div>高度: {selectedNode.alt_m.toFixed(0)} m</div>
             <div>连通: {selectedNode.has_link ? `是（度 ${selectedNode.degree}）` : '否'}</div>
+            <div className="detail-subtitle">监控指标</div>
+            {selectedNodeMetric ? (
+              <div className="metrics-grid">
+                <div>状态: {selectedNodeMetric.status || '-'}</div>
+                <div>CPU 利用率: {formatPercentFromRatio(selectedNodeMetric.cpu_ratio)}</div>
+                <div>内存利用率: {formatPercentFromRatio(selectedNodeMetric.mem_ratio)}</div>
+                <div>发送速率: {formatBps(selectedNodeMetric.tx_bps)}</div>
+                <div>接收速率: {formatBps(selectedNodeMetric.rx_bps)}</div>
+                <div>连接数: {formatFixed(selectedNodeMetric.conn_count, 0)}</div>
+                <div>更新时间: {formatTimestamp(selectedNodeMetric.timestamp)}</div>
+              </div>
+            ) : (
+              <div className="metric-empty">暂无节点监控数据</div>
+            )}
             <div className="detail-actions">
               <button type="button" onClick={() => sendControl('inject_node_fault', { node_id: selectedNode.id })}>
                 注入节点故障
@@ -1021,6 +1210,20 @@ export function App() {
             <div>B 类别: {selectedLink.b.category}</div>
             <div>A 高度: {selectedLink.a.alt_m.toFixed(0)} m</div>
             <div>B 高度: {selectedLink.b.alt_m.toFixed(0)} m</div>
+            <div className="detail-subtitle">监控指标</div>
+            {selectedLinkMetric ? (
+              <div className="metrics-grid">
+                <div>状态: {selectedLinkMetric.state || '-'}</div>
+                <div>时延 RTT: {formatFixed(selectedLinkMetric.rtt_ms)} ms</div>
+                <div>抖动: {formatFixed(selectedLinkMetric.jitter_ms)} ms</div>
+                <div>丢包率: {formatPercentFromRatio(selectedLinkMetric.loss_rate)}</div>
+                <div>信噪比: {formatFixed(selectedLinkMetric.snr_db)} dB</div>
+                <div>误码率: {formatFixed(selectedLinkMetric.ber, 6)}</div>
+                <div>更新时间: {formatTimestamp(selectedLinkMetric.timestamp)}</div>
+              </div>
+            ) : (
+              <div className="metric-empty">暂无链路监控数据</div>
+            )}
             <div className="detail-actions">
               <button
                 type="button"
