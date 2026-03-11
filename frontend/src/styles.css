@@ -228,6 +228,30 @@ body,
   font-size: 12px;
 }
 
+.route-mode-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.route-mode-row button {
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #eff6ff;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.route-mode-row button.active {
+  border-color: rgba(255, 243, 109, 0.65);
+  background: rgba(255, 243, 109, 0.18);
+  color: #fffde7;
+  box-shadow: 0 0 12px rgba(255, 243, 109, 0.18);
+}
+
 .route-meta {
   display: flex;
   flex-wrap: wrap;
