@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 from dataclasses import asdict
+from pathlib import Path
 from time import perf_counter
 
 from .engine import SimulationConfig, TopologyEngine
@@ -20,6 +21,11 @@ def parse_args() -> argparse.Namespace:
         "--hot-reload-link-policy",
         action="store_true",
         help="Reload link policy file when it changes",
+    )
+    parser.add_argument(
+        "--route-snapshot",
+        default="run/star300lite/route_snapshot.json",
+        help="Optional JSON path exposing the latest applied static-route snapshot",
     )
     return parser.parse_args()
 
@@ -43,7 +49,21 @@ def _find_existing_fault(engine: TopologyEngine, fault_type: str, target: dict) 
     return None
 
 
-def _handle_control_message(engine: TopologyEngine, payload: dict) -> dict:
+def _load_route_snapshot(route_snapshot_path: Path | None) -> dict:
+    if route_snapshot_path is None:
+        raise ValueError("route snapshot is disabled")
+    if not route_snapshot_path.is_file():
+        raise ValueError(f"route snapshot not found: {route_snapshot_path}")
+    try:
+        payload = json.loads(route_snapshot_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"route snapshot is invalid JSON: {route_snapshot_path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("route snapshot root must be a JSON object")
+    return payload
+
+
+def _handle_control_message(engine: TopologyEngine, payload: dict, route_snapshot_path: Path | None) -> dict:
     action = payload.get("action")
     request_id = payload.get("request_id")
     if not isinstance(action, str) or not action:
@@ -143,6 +163,15 @@ def _handle_control_message(engine: TopologyEngine, payload: dict) -> dict:
                 "request_id": request_id,
                 "faults": engine.list_faults(),
             }
+
+        if action == "route_snapshot":
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "route_snapshot": _load_route_snapshot(route_snapshot_path),
+            }
     except ValueError as exc:
         return _control_error(action, request_id, str(exc))
 
@@ -156,6 +185,9 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
         raise RuntimeError("websockets package is required. Install deps with `uv sync --dev`.") from exc
 
     engine = TopologyEngine(config=config, seed=seed)
+    route_snapshot_path = None
+    if config.route_snapshot_path:
+        route_snapshot_path = Path(config.route_snapshot_path).expanduser()
     clients: set = set()
     redis_queue: asyncio.Queue[tuple[float, object, object]] = asyncio.Queue(maxsize=2)
 
@@ -171,7 +203,7 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
                     if not isinstance(payload, dict):
                         response = _control_error(None, None, "payload must be a JSON object")
                     else:
-                        response = _handle_control_message(engine, payload)
+                        response = _handle_control_message(engine, payload, route_snapshot_path)
                 await websocket.send(json.dumps(response, separators=(",", ":")))
         finally:
             clients.discard(websocket)
@@ -251,6 +283,7 @@ def main() -> None:
         timestep_s=args.dt,
         link_policy_path=args.link_policy,
         link_policy_hot_reload=args.hot_reload_link_policy,
+        route_snapshot_path=args.route_snapshot,
     )
     asyncio.run(run_server(args.host, args.port, config=config, seed=args.seed))
 

@@ -191,6 +191,108 @@ body,
   padding-top: 10px;
 }
 
+.route-panel {
+  margin-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  padding-top: 10px;
+}
+
+.route-hint {
+  font-size: 12px;
+  line-height: 1.45;
+  color: #c8d9ea;
+}
+
+.route-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.route-grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #e9eff8;
+}
+
+.route-grid select {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(5, 19, 30, 0.85);
+  color: #f1f5f9;
+  padding: 7px 8px;
+  font-size: 12px;
+}
+
+.route-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.route-summary {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #e6eef8;
+}
+
+.route-empty {
+  margin-top: 8px;
+  border: 1px solid rgba(231, 76, 60, 0.35);
+  border-radius: 8px;
+  background: rgba(231, 76, 60, 0.14);
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ffdede;
+}
+
+.route-path-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.route-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.09);
+  color: #f7fbff;
+}
+
+.route-pill.src {
+  border-color: rgba(195, 247, 58, 0.45);
+  background: rgba(195, 247, 58, 0.16);
+}
+
+.route-pill.dst {
+  border-color: rgba(255, 209, 102, 0.45);
+  background: rgba(255, 209, 102, 0.16);
+}
+
+.route-pill.mid {
+  border-color: rgba(114, 221, 247, 0.36);
+  background: rgba(114, 221, 247, 0.14);
+}
+
+.route-arrow {
+  color: #80ffdb;
+  font-weight: 700;
+}
+
 .layer-header {
   display: flex;
   justify-content: space-between;
@@ -303,6 +405,11 @@ body,
 .swatch.sat-mobile {
   background: #ff7f11;
   box-shadow: 0 0 8px rgba(255, 127, 17, 0.65);
+}
+
+.swatch.route {
+  background: #80ffdb;
+  box-shadow: 0 0 8px rgba(128, 255, 219, 0.78);
 }
 
 .node-tooltip {
@@ -461,5 +568,9 @@ body,
     bottom: 10px;
     width: min(360px, calc(100vw - 20px));
     max-height: 42vh;
+  }
+
+  .route-grid {
+    grid-template-columns: 1fr;
   }
 }
