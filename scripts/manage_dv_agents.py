@@ -150,6 +150,20 @@ def _flush_subset_routes(entry: NodeEntry, all_prefixes: list[str], args: argpar
     return True, ""
 
 
+def _disable_interface_offloads(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
+    dev = str(args.route_dev)
+    shell = (
+        "set -eu; "
+        "command -v ethtool >/dev/null 2>&1; "
+        f"ethtool -K {dev} rx off tx off tso off gso off gro off >/dev/null 2>&1"
+    )
+    proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=float(args.command_timeout_s))
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, err[:400]
+    return True, ""
+
+
 def _install_agent_script(entry: NodeEntry, args: argparse.Namespace, script_payload: str) -> tuple[bool, str]:
     remote = str(args.agent_remote_path)
     mkdir_cmd = ["docker", "exec", entry.container_exec, "sh", "-lc", f"mkdir -p {Path(remote).parent.as_posix()} /run/dv"]
@@ -247,6 +261,10 @@ def main() -> int:
                 ok, msg = fut.result()
                 if not ok:
                     failures.append(f"flush failed: {msg}")
+            for fut in [pool.submit(_disable_interface_offloads, entry, args) for entry in entries]:
+                ok, msg = fut.result()
+                if not ok:
+                    failures.append(f"offload disable failed: {msg}")
             for fut in [pool.submit(_install_agent_script, entry, args, script_payload) for entry in entries]:
                 ok, msg = fut.result()
                 if not ok:

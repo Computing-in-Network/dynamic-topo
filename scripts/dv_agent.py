@@ -52,6 +52,7 @@ class DVAgent:
         self.args = args
         self.node_id = str(args.node_id)
         self.local_prefix = self._normalize_prefix(args.local_prefix)
+        self.local_ip = str(ipaddress.ip_interface(args.local_prefix).ip)
         self.route_dev = str(args.route_dev)
         self.neighbor_state_path = Path(args.neighbor_state)
         self.state_output_path = Path(args.state_output)
@@ -330,7 +331,7 @@ class DVAgent:
             if current == next_hop:
                 continue
             ok = self._run_route_cmd(
-                ["ip", "-4", "route", "replace", prefix, "via", next_hop, "dev", self.route_dev]
+                ["ip", "-4", "route", "replace", prefix, "via", next_hop, "dev", self.route_dev, "src", self.local_ip]
             )
             if ok:
                 self.applied_routes[prefix] = next_hop
