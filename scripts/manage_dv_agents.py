@@ -183,13 +183,14 @@ def _stop_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
 
 def _start_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
     remote = str(args.agent_remote_path)
-    pattern = _agent_pattern(remote)
     neighbor_path = str(args.neighbor_state_path)
     state_path = str(args.state_output_path)
     log_path = "/tmp/dv_agent.log"
+    ok, err = _stop_agent(entry, args)
+    if not ok:
+        return False, f"pre-stop failed: {err}"
     shell = (
         "set -eu; "
-        f"pkill -f {pattern!r} >/dev/null 2>&1 || true; "
         f": > {log_path}; "
         f"nohup python3 {remote} "
         f"--node-id {entry.node_id} "
@@ -201,13 +202,18 @@ def _start_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]
         f"--update-interval-s {float(args.update_interval_s)} "
         f"--route-timeout-s {float(args.route_timeout_s)} "
         f"> {log_path} 2>&1 & "
-        f"sleep 1; pgrep -af {pattern!r}"
+        "sleep 1"
     )
     proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=float(args.command_timeout_s))
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         return False, err[:400]
-    return True, (proc.stdout or "").strip()
+    ok, status = _status_agent(entry, args)
+    if not ok:
+        return False, status
+    if status == "stopped":
+        return False, "agent exited immediately"
+    return True, status
 
 
 def _status_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
