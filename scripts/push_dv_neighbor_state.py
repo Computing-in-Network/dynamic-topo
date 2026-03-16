@@ -22,6 +22,7 @@ class NodeEntry:
     container_name: str
     container_exec: str
     container_ip: str
+    container_mac: str
     loopback_prefix: str
 
 
@@ -44,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mapping-csv", default="docs/node_mapping_300.csv", help="Node mapping CSV path")
     parser.add_argument("--max-nodes", type=int, default=10, help="How many nodes from mapping CSV to use")
     parser.add_argument("--neighbor-state-path", default="/run/dv/neighbors.json", help="Neighbor JSON path in node")
+    parser.add_argument("--neighbor-dev", default="veth_0", help="Node interface used for static neighbor entries")
     parser.add_argument("--min-stable-frames", type=int, default=2, help="Only apply after N identical frames")
     parser.add_argument(
         "--min-apply-interval-s",
@@ -110,6 +112,16 @@ def _extract_veth0_ip(ref: str, timeout_s: float) -> str:
     return ""
 
 
+def _extract_veth0_mac(ref: str, timeout_s: float) -> str:
+    proc = _run_cmd(
+        ["docker", "exec", ref, "sh", "-lc", "cat /sys/class/net/veth_0/address"],
+        timeout_s=timeout_s,
+    )
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or "").strip().lower()
+
+
 def _extract_loopback_prefix(ref: str, timeout_s: float) -> str:
     proc = _run_cmd(["docker", "exec", ref, "ip", "-o", "-4", "addr", "show", "dev", "lo"], timeout_s=timeout_s)
     if proc.returncode != 0:
@@ -142,9 +154,12 @@ def _resolve_node_entry(row: dict[str, str], timeout_s: float) -> NodeEntry:
         raise ValueError(f"cannot resolve exec target for {row['node_id']}")
 
     container_ip = _extract_veth0_ip(exec_target, timeout_s=timeout_s)
+    container_mac = _extract_veth0_mac(exec_target, timeout_s=timeout_s)
     loopback_prefix = _extract_loopback_prefix(exec_target, timeout_s=timeout_s)
     if not container_ip:
         raise ValueError(f"missing veth_0 ipv4 for {row['node_id']}({exec_target})")
+    if not container_mac:
+        raise ValueError(f"missing veth_0 mac for {row['node_id']}({exec_target})")
     if not loopback_prefix:
         raise ValueError(f"missing loopback prefix for {row['node_id']}({exec_target})")
 
@@ -154,6 +169,7 @@ def _resolve_node_entry(row: dict[str, str], timeout_s: float) -> NodeEntry:
         container_name=str(row["container_name"]),
         container_exec=exec_target,
         container_ip=container_ip,
+        container_mac=container_mac,
         loopback_prefix=loopback_prefix,
     )
 
@@ -202,8 +218,12 @@ def build_neighbor_payloads(
     for a, b in sorted(edges):
         ea = by_node[a]
         eb = by_node[b]
-        neighbors[a].append({"node_id": eb.node_id, "ip": eb.container_ip, "prefix": eb.loopback_prefix})
-        neighbors[b].append({"node_id": ea.node_id, "ip": ea.container_ip, "prefix": ea.loopback_prefix})
+        neighbors[a].append(
+            {"node_id": eb.node_id, "ip": eb.container_ip, "mac": eb.container_mac, "prefix": eb.loopback_prefix}
+        )
+        neighbors[b].append(
+            {"node_id": ea.node_id, "ip": ea.container_ip, "mac": ea.container_mac, "prefix": ea.loopback_prefix}
+        )
 
     out: dict[str, str] = {}
     generated_at = datetime.now(timezone.utc).isoformat()
@@ -238,6 +258,31 @@ def _write_neighbor_file(container: str, payload: str, path: str, timeout_s: flo
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         return False, f"rename failed: {err[:400]}"
+    return True, ""
+
+
+def _sync_static_neighbors(
+    *,
+    entry: NodeEntry,
+    desired_neighbors: list[dict[str, str]],
+    known_entries: list[NodeEntry],
+    neighbor_dev: str,
+    timeout_s: float,
+) -> tuple[bool, str]:
+    lines = ["set -eu"]
+    for item in known_entries:
+        if item.node_id == entry.node_id:
+            continue
+        lines.append(f"ip neigh del {item.container_ip} dev {neighbor_dev} >/dev/null 2>&1 || true")
+    for item in desired_neighbors:
+        ip = str(item["ip"])
+        mac = str(item["mac"]).lower()
+        lines.append(f"ip neigh replace {ip} lladdr {mac} dev {neighbor_dev} nud permanent")
+    shell = "; ".join(lines)
+    proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=timeout_s)
+    if proc.returncode != 0:
+        err = (proc.stderr or proc.stdout or "").strip()
+        return False, f"neighbor sync failed: {err[:400]}"
     return True, ""
 
 
@@ -331,11 +376,26 @@ async def run_controller(args: argparse.Namespace) -> int:
                     else:
                         failures: list[str] = []
                         for entry in entries:
+                            try:
+                                neighbor_payload = json.loads(payloads[entry.container_exec])
+                            except json.JSONDecodeError:
+                                failures.append(f"{entry.node_id}({entry.container_exec}): invalid generated payload")
+                                continue
                             ok, err = _write_neighbor_file(
                                 entry.container_exec,
                                 payloads[entry.container_exec],
                                 str(args.neighbor_state_path),
                                 timeout_s,
+                            )
+                            if not ok:
+                                failures.append(f"{entry.node_id}({entry.container_exec}): {err}")
+                                continue
+                            ok, err = _sync_static_neighbors(
+                                entry=entry,
+                                desired_neighbors=list(neighbor_payload.get("neighbors") or []),
+                                known_entries=entries,
+                                neighbor_dev=str(args.neighbor_dev),
+                                timeout_s=timeout_s,
                             )
                             if not ok:
                                 failures.append(f"{entry.node_id}({entry.container_exec}): {err}")
