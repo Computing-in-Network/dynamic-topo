@@ -178,6 +178,31 @@ POLICY_APPLY_INTERVAL_S=30 ROUTE_APPLY_INTERVAL_S=30 ./scripts/start_star300lite
 - 推荐起步参数：`POLICY_APPLY_INTERVAL_S=30`、`ROUTE_APPLY_INTERVAL_S=30`
 - 若观察到路由震荡或宿主机负载偏高，可先调到 `60`
 
+10 节点 Route A DV 动态路由原型：
+
+```bash
+# 重要：不要与 300 节点静态控制面并行运行
+# 若已启动过：
+./scripts/stop_star300lite_control_plane.sh
+
+# 启动 10 节点 DV 原型（中心只下发直连邻居，节点自己跑 DV）
+./scripts/start_star10_dv_route_a.sh
+
+# 查看 10 个目标节点中的 agent 状态
+python3 scripts/manage_dv_agents.py \
+  --action status \
+  --mapping-csv run/star10_dv_route_a/node_mapping_10.csv \
+  --max-nodes 10
+
+# 停止 DV 原型
+./scripts/stop_star10_dv_route_a.sh
+```
+
+- `scripts/push_dv_neighbor_state.py` 只向节点下发“当前直连邻居集合”，不再直接下发全局路由
+- `scripts/dv_agent.py` 在容器内周期交换距离向量，并将结果写入本机 Linux 路由表
+- 当前原型范围仅覆盖前 `10` 个节点，用于验证 DV 收敛链路
+- 该原型不能与 `push_static_routes.py` 或其他 `push_sim_policy.py` 常驻实例同时运行
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`
