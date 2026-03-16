@@ -133,11 +133,15 @@ def load_entries(args: argparse.Namespace) -> list[NodeEntry]:
 
 
 def _flush_subset_routes(entry: NodeEntry, all_prefixes: list[str], args: argparse.Namespace) -> tuple[bool, str]:
-    prefixes = [p for p in all_prefixes if p != entry.loopback_prefix]
-    if not prefixes:
-        return True, ""
-    shell = "set -eu; " + " ".join(
-        [f"ip -4 route del {prefix} >/dev/null 2>&1 || true;" for prefix in prefixes]
+    del all_prefixes
+    shell = (
+        "set -eu; "
+        "ip -4 route show | awk '/^10\\.255\\./ {print $1}' | "
+        "while read -r prefix; do "
+        f"  if [ \"$prefix\" != {entry.loopback_prefix!r} ]; then "
+        "    ip -4 route del \"$prefix\" >/dev/null 2>&1 || true; "
+        "  fi; "
+        "done"
     )
     proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=float(args.command_timeout_s))
     if proc.returncode != 0:
