@@ -223,6 +223,28 @@ python3 scripts/manage_dv_agents.py \
 ./scripts/stop_star50_dv_route_a.sh
 ```
 
+100 节点 Route A DV 规模验证：
+
+```bash
+# 若已启动过其他 Route A 场景：
+./scripts/stop_star50_dv_route_a.sh
+
+# 启动 100 节点 DV 原型（当前默认选择前 100 个节点）
+./scripts/start_star100_dv_route_a.sh
+
+# 如需调大 100 节点 DV 路由超时窗口
+DV_ROUTE_TIMEOUT_S=60 ./scripts/start_star100_dv_route_a.sh
+
+# 查看 100 个目标节点中的 agent 状态
+python3 scripts/manage_dv_agents.py \
+  --action status \
+  --mapping-csv run/star100_dv_route_a/node_mapping_100.csv \
+  --max-nodes 100
+
+# 停止 100 节点 DV 原型
+./scripts/stop_star100_dv_route_a.sh
+```
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`

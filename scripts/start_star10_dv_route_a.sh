@@ -14,6 +14,8 @@ SUBSET_STRATEGY="${SUBSET_STRATEGY:-same-plane-ring}"
 MIN_STABLE_FRAMES="${MIN_STABLE_FRAMES:-2}"
 SIM_POLICY_APPLY_INTERVAL_S="${SIM_POLICY_APPLY_INTERVAL_S:-5}"
 NEIGHBOR_APPLY_INTERVAL_S="${NEIGHBOR_APPLY_INTERVAL_S:-2}"
+DV_UPDATE_INTERVAL_S="${DV_UPDATE_INTERVAL_S:-5}"
+DV_ROUTE_TIMEOUT_S="${DV_ROUTE_TIMEOUT_S:-15}"
 START_STREAM_SERVER="${START_STREAM_SERVER:-0}"
 STREAM_HOST="${STREAM_HOST:-0.0.0.0}"
 STREAM_PORT="${STREAM_PORT:-8765}"
@@ -122,7 +124,9 @@ fi
 "$PYTHON_BIN" scripts/manage_dv_agents.py \
   --action install-start \
   --mapping-csv "$SUBSET_MAPPING_CSV" \
-  --max-nodes "$NODE_COUNT"
+  --max-nodes "$NODE_COUNT" \
+  --update-interval-s "$DV_UPDATE_INTERVAL_S" \
+  --route-timeout-s "$DV_ROUTE_TIMEOUT_S"
 
 start_bg "push_sim_policy" \
   "$PYTHON_BIN" -u scripts/push_sim_policy.py \
