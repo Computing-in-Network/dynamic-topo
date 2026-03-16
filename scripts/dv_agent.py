@@ -64,7 +64,6 @@ class DVAgent:
 
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind((str(args.listen_host), int(args.listen_port)))
-        self.sock.setblocking(False)
 
         now = time.time()
         self.routes: dict[str, RouteEntry] = {
@@ -204,7 +203,10 @@ class DVAgent:
                 "sent_at": now,
             }
             wire = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-            self.sock.sendto(wire, (neighbor.ip, int(self.args.listen_port)))
+            try:
+                self.sock.sendto(wire, (neighbor.ip, int(self.args.listen_port)))
+            except OSError as exc:
+                self.log(f"send_failed neighbor={neighbor.node_id} ip={neighbor.ip} err={exc}")
         self.seq += 1
         self.last_periodic_send = now
         self.log(f"update_sent reason={reason} neighbors={len(self.neighbors)} routes={len(self.routes)} seq={self.seq}")
@@ -259,12 +261,22 @@ class DVAgent:
             if current is not None and current.kind == "direct" and current.learned_from != neighbor.node_id:
                 continue
 
-            if (
-                current is None
-                or (current.kind == "dv" and current.learned_from == neighbor.node_id)
-                or candidate_metric < current.metric
+            next_kind = "direct" if prefix == neighbor.prefix else "dv"
+            if current is not None and current.kind == "dv" and current.learned_from == neighbor.node_id:
+                if current.metric == candidate_metric and current.next_hop_ip == neighbor.ip and current.kind == next_kind:
+                    self.routes[prefix] = RouteEntry(
+                        prefix=prefix,
+                        metric=current.metric,
+                        next_hop_ip=current.next_hop_ip,
+                        learned_from=current.learned_from,
+                        kind=current.kind,
+                        updated_at=now,
+                    )
+                    continue
+
+            if current is None or candidate_metric < current.metric or (
+                current.kind == "dv" and current.learned_from == neighbor.node_id
             ):
-                next_kind = "direct" if prefix == neighbor.prefix else "dv"
                 self.routes[prefix] = RouteEntry(
                     prefix=prefix,
                     metric=candidate_metric,

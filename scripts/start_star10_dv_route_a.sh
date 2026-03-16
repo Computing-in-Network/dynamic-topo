@@ -10,6 +10,7 @@ CONTAINER_PREFIX="${CONTAINER_PREFIX:-star300lite_r_}"
 SIM_CONTAINER="${SIM_CONTAINER:-star300lite_sim}"
 MAPPING_CSV="${MAPPING_CSV:-docs/node_mapping_300.csv}"
 NODE_COUNT="${NODE_COUNT:-10}"
+SUBSET_STRATEGY="${SUBSET_STRATEGY:-same-plane-ring}"
 MIN_STABLE_FRAMES="${MIN_STABLE_FRAMES:-2}"
 SIM_POLICY_APPLY_INTERVAL_S="${SIM_POLICY_APPLY_INTERVAL_S:-5}"
 NEIGHBOR_APPLY_INTERVAL_S="${NEIGHBOR_APPLY_INTERVAL_S:-2}"
@@ -75,7 +76,7 @@ if pgrep -af 'scripts/push_static_routes.py' >/dev/null 2>&1; then
   exit 1
 fi
 if pgrep -af 'scripts/push_sim_policy.py' >/dev/null 2>&1; then
-  echo "[fatal] detected running push_sim_policy.py. Stop other sim-policy controllers before starting the 10-node DV prototype." >&2
+  echo "[fatal] detected running push_sim_policy.py. Stop other sim-policy controllers before starting the DV Route A prototype." >&2
   exit 1
 fi
 
@@ -86,7 +87,8 @@ fi
 "$PYTHON_BIN" scripts/select_mapping_subset.py \
   --input "$MAPPING_CSV" \
   --output "$SUBSET_MAPPING_CSV" \
-  --max-nodes "$NODE_COUNT"
+  --max-nodes "$NODE_COUNT" \
+  --strategy "$SUBSET_STRATEGY"
 
 "$PYTHON_BIN" scripts/restore_sim_datapath.py \
   --sim-container "$SIM_CONTAINER" \

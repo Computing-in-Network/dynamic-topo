@@ -203,6 +203,26 @@ python3 scripts/manage_dv_agents.py \
 - 当前原型范围仅覆盖前 `10` 个节点，用于验证 DV 收敛链路
 - 该原型不能与 `push_static_routes.py` 或其他 `push_sim_policy.py` 常驻实例同时运行
 
+50 节点 Route A DV 稳定性验证：
+
+```bash
+# 重要：不要与 300 节点静态控制面并行运行
+# 若已启动过其他 Route A 场景：
+./scripts/stop_star10_dv_route_a.sh
+
+# 启动 50 节点 DV 原型（当前默认选择前 50 个节点）
+./scripts/start_star50_dv_route_a.sh
+
+# 查看 50 个目标节点中的 agent 状态
+python3 scripts/manage_dv_agents.py \
+  --action status \
+  --mapping-csv run/star50_dv_route_a/node_mapping_50.csv \
+  --max-nodes 50
+
+# 停止 50 节点 DV 原型
+./scripts/stop_star50_dv_route_a.sh
+```
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`
