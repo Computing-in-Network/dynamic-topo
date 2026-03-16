@@ -168,7 +168,7 @@ def _install_agent_script(entry: NodeEntry, args: argparse.Namespace, script_pay
 
 def _stop_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
     remote = str(args.agent_remote_path)
-    shell = f"pkill -f '^python3 {remote}' >/dev/null 2>&1 || true"
+    shell = f"pkill -f {remote!r} >/dev/null 2>&1 || true"
     proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=float(args.command_timeout_s))
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
@@ -183,7 +183,7 @@ def _start_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]
     log_path = "/tmp/dv_agent.log"
     shell = (
         "set -eu; "
-        f"pkill -f '^python3 {remote}' >/dev/null 2>&1 || true; "
+        f"pkill -f {remote!r} >/dev/null 2>&1 || true; "
         f": > {log_path}; "
         f"nohup python3 {remote} "
         f"--node-id {entry.node_id} "
@@ -195,7 +195,7 @@ def _start_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]
         f"--update-interval-s {float(args.update_interval_s)} "
         f"--route-timeout-s {float(args.route_timeout_s)} "
         f"> {log_path} 2>&1 & "
-        f"sleep 1; pgrep -af '^python3 {remote}'"
+        f"sleep 1; pgrep -af {remote!r}"
     )
     proc = _run_cmd(["docker", "exec", entry.container_exec, "sh", "-lc", shell], timeout_s=float(args.command_timeout_s))
     if proc.returncode != 0:
@@ -207,7 +207,7 @@ def _start_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]
 def _status_agent(entry: NodeEntry, args: argparse.Namespace) -> tuple[bool, str]:
     remote = str(args.agent_remote_path)
     proc = _run_cmd(
-        ["docker", "exec", entry.container_exec, "sh", "-lc", f"pgrep -af '^python3 {remote}' || true"],
+        ["docker", "exec", entry.container_exec, "sh", "-lc", f"pgrep -af {remote!r} || true"],
         timeout_s=float(args.command_timeout_s),
     )
     if proc.returncode != 0:
