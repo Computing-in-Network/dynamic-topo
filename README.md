@@ -178,6 +178,55 @@ POLICY_APPLY_INTERVAL_S=30 ROUTE_APPLY_INTERVAL_S=30 ./scripts/start_star300lite
 - 推荐起步参数：`POLICY_APPLY_INTERVAL_S=30`、`ROUTE_APPLY_INTERVAL_S=30`
 - 若观察到路由震荡或宿主机负载偏高，可先调到 `60`
 
+星历预测路由第一版：
+
+```bash
+# 1) 生成未来 5 分钟的预测路由计划
+# 说明：
+# - 计划会按 TopologyEngine 的内部步长顺序推进
+# - 每 30 秒采一个样本
+# - 连续相同的路由状态会自动压缩成 slot
+python3 scripts/build_predictive_route_plan.py \
+  --mapping-csv docs/node_mapping_300.csv \
+  --start-offset-s 0 \
+  --horizon-s 300 \
+  --sample-interval-s 30 \
+  --engine-timestep-s 1 \
+  --output run/predictive_route_plan.json
+
+# 2) 查看计划摘要
+python3 - <<'PY'
+import json
+from pathlib import Path
+plan = json.loads(Path('run/predictive_route_plan.json').read_text())
+print('samples=', plan['sample_count'], 'slots=', plan['slot_count'])
+for slot in plan['slots']:
+    print(
+        slot['slot_index'],
+        slot['start_offset_s'],
+        slot['end_offset_s'],
+        slot['largest_component_size_min'],
+        slot['largest_component_size_max'],
+    )
+PY
+
+# 3) 选择一个 slot 做一次 dry-run 应用
+python3 scripts/apply_predictive_route_plan.py \
+  --plan run/predictive_route_plan.json \
+  --slot-index 0 \
+  --dry-run
+```
+
+- 生成文件 schema：`dynamic_topo.predictive_route_plan.v1`
+- 每个 slot 包含：
+  - 时间窗口
+  - 边数范围
+  - 连通分量规模范围
+  - 按节点生成的下一跳路由
+- 第一版是“离线计划生成 + 计划消费入口”，还没有替换现有实时控制器
+- 若要对齐一个已经运行中的实时仿真，需要额外对齐当前仿真时间和链路迟滞状态
+- `slot 0` 可能包含引擎冷启动阶段的迟滞影响；实际使用时通常应优先选择后续稳定 slot
+
 ## Git Flow 回退规范
 
 - 详见：`docs/gitflow_rollback.md`
