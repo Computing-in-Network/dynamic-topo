@@ -73,13 +73,17 @@ def _select_slot(plan: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         return slot
     if float(args.at_offset_s) >= 0.0:
         offset_s = float(args.at_offset_s)
+        previous: dict[str, Any] | None = None
         for slot in slots:
             if not isinstance(slot, dict):
                 continue
             start_s = float(slot.get("start_offset_s", -1.0))
-            end_s = float(slot.get("end_offset_s", -1.0))
-            if start_s <= offset_s <= end_s:
-                return slot
+            if start_s <= offset_s:
+                previous = slot
+                continue
+            break
+        if previous is not None and offset_s <= float(plan.get("horizon_s", offset_s)):
+            return previous
         raise ValueError(f"no predictive route slot covers at-offset-s={offset_s}")
     slot = slots[0]
     if not isinstance(slot, dict):

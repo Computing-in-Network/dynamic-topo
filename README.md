@@ -215,17 +215,45 @@ python3 scripts/apply_predictive_route_plan.py \
   --plan run/predictive_route_plan.json \
   --slot-index 0 \
   --dry-run
+
+# 4) 生成未来 5 分钟的预测 sim policy 计划
+python3 scripts/build_predictive_sim_policy_plan.py \
+  --mapping-csv docs/node_mapping_300.csv \
+  --sim-container auto \
+  --start-offset-s 0 \
+  --horizon-s 300 \
+  --sample-interval-s 30 \
+  --engine-timestep-s 1 \
+  --output run/predictive_sim_policy_plan.json
+
+# 5) 选择一个 slot 做一次 sim policy 应用
+python3 scripts/apply_predictive_sim_policy_plan.py \
+  --plan run/predictive_sim_policy_plan.json \
+  --slot-index 0 \
+  --sim-container auto
+
+# 6) 启动预测控制面，按时间偏移切换 route slot + sim policy slot
+python3 -u scripts/run_predictive_control_plane.py \
+  --route-plan run/predictive_route_plan.json \
+  --sim-plan run/predictive_sim_policy_plan.json \
+  --poll-interval-s 1 \
+  --stop-at-plan-end
 ```
 
 - 生成文件 schema：`dynamic_topo.predictive_route_plan.v1`
+- sim policy 计划 schema：`dynamic_topo.predictive_sim_policy_plan.v1`
 - 每个 slot 包含：
   - 时间窗口
   - 边数范围
   - 连通分量规模范围
   - 按节点生成的下一跳路由
+- 预测控制器会按 wall clock 相对偏移切换 slot；第一版默认以“进程启动时刻”为 offset `0`
+- `run_predictive_control_plane.py` 当前已验证可以完成真实切换，而不是只做一次性 apply
 - 第一版是“离线计划生成 + 计划消费入口”，还没有替换现有实时控制器
 - 若要对齐一个已经运行中的实时仿真，需要额外对齐当前仿真时间和链路迟滞状态
 - `slot 0` 可能包含引擎冷启动阶段的迟滞影响；实际使用时通常应优先选择后续稳定 slot
+- 在当前 `300` 节点计划里，主连通分量规模约为 `268`，其余 `32` 个节点为孤立点；预测路由和预测 sim policy 都会如实反映这一点，而不会虚构全连通
+- 当前 `300` 节点验证已观测到控制器从 `slot 2` 自动切换到 `slot 3`
 
 ## Git Flow 回退规范
 

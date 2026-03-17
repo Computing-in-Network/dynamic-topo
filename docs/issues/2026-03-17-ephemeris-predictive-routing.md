@@ -40,6 +40,11 @@
    - 如何查看和应用 route plan
    - 当前第一版的边界
 
+4. 预测 sim policy 与定时切换
+   - 新增未来时间窗口的 sim policy plan
+   - 支持选择某个 slot 应用到 `star300lite_sim`
+   - 支持按时间偏移自动切换 route slot 和 sim policy slot
+
 ## 验收标准
 
 1. 能生成未来时间窗口的 `route_plan.json`
@@ -51,9 +56,37 @@
    - 每个时间段的按节点路由下一跳
 3. 能基于生成结果选择一个时间段执行一次路由应用或 dry-run
 4. 文档说明清楚第一版与当前实时静态路由控制器的关系
+5. 能生成未来时间窗口的 `predictive_sim_policy_plan.json`
+6. 能按时间偏移自动切换 route slot 与 sim policy slot
 
 ## 注意事项
 
 1. 第一版目标是“预测计划生成 + 计划应用入口”，不是一次性替换现有实时控制器
 2. 计划路由若要用于持续生产切换，还需要后续解决时钟、切换窗口、失败回退等问题
 3. 若未来拓扑本身存在长期分裂，预测路由也只能如实反映不可达，而不能凭空保证全连通
+
+## 当前实现进展
+
+已完成：
+
+- `build_predictive_route_plan.py`
+- `apply_predictive_route_plan.py`
+- `build_predictive_sim_policy_plan.py`
+- `apply_predictive_sim_policy_plan.py`
+- `run_predictive_control_plane.py`
+
+已完成的 300 节点验证：
+
+- 停掉原有 DV agent 与 DV 控制进程
+- 生成 `run/predictive_route_plan_300.json`
+- 生成 `run/predictive_sim_policy_plan_300.json`
+- 将预测路由 slot 实际下发到 300 个容器
+- 将预测 sim policy slot 实际写入 `star300lite_sim`
+
+当前结果：
+
+- `300` 个容器路由应用成功
+- 当前选中 slot 的主连通分量规模为 `268`
+- 其余 `32` 个节点在该 slot 中为孤立点
+- 因此当前验证结果是“300 节点完成预测控制面下发”，不是“300 节点全连通”
+- 预测控制器已实测从 `slot 2` 自动切换到 `slot 3`
