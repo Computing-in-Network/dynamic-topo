@@ -197,6 +197,12 @@ body,
   padding-top: 10px;
 }
 
+.predictive-panel {
+  margin-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.18);
+  padding-top: 10px;
+}
+
 .route-hint {
   font-size: 12px;
   line-height: 1.45;
@@ -260,6 +266,14 @@ body,
 }
 
 .route-summary {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #e6eef8;
+}
+
+.predictive-summary {
   display: grid;
   gap: 4px;
   margin-top: 8px;

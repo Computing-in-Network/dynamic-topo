@@ -74,6 +74,8 @@
 - `build_predictive_sim_policy_plan.py`
 - `apply_predictive_sim_policy_plan.py`
 - `run_predictive_control_plane.py`
+- `predictive_control_snapshot` 控制动作
+- 前端“预测控制面”状态面板
 
 已完成的 300 节点验证：
 
@@ -90,3 +92,4 @@
 - 其余 `32` 个节点在该 slot 中为孤立点
 - 因此当前验证结果是“300 节点完成预测控制面下发”，不是“300 节点全连通”
 - 预测控制器已实测从 `slot 2` 自动切换到 `slot 3`
+- 前端可读取当前 `route slot / sim slot / apply 状态 / rule_count`

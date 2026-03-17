@@ -90,6 +90,7 @@ const FRAME_QUEUE_MAX = 600;
 const SPEED_OPTIONS = [0.5, 1, 2];
 const ORBIT_UPDATE_INTERVAL_TICKS = 4;
 const ROUTE_SNAPSHOT_POLL_MS = 5000;
+const PREDICTIVE_CONTROL_POLL_MS = 5000;
 const ROUTE_VIEW_MODES = [
   { id: 'normal', label: '普通' },
   { id: 'focus', label: '显示路由' },
@@ -455,6 +456,12 @@ export function App() {
     error: '',
     fetchedAt: null
   });
+  const [predictiveControlSnapshot, setPredictiveControlSnapshot] = useState(null);
+  const [predictiveControlStatus, setPredictiveControlStatus] = useState({
+    available: false,
+    error: '',
+    fetchedAt: null
+  });
   const [routeQuery, setRouteQuery] = useState({
     srcId: '',
     dstId: ''
@@ -527,6 +534,14 @@ export function App() {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (action === 'route_snapshot') {
         setRouteSnapshotStatus((prev) => ({
+          ...prev,
+          available: false,
+          error: '控制通道未连接'
+        }));
+        return;
+      }
+      if (action === 'predictive_control_snapshot') {
+        setPredictiveControlStatus((prev) => ({
           ...prev,
           available: false,
           error: '控制通道未连接'
@@ -736,6 +751,23 @@ export function App() {
           }
           return;
         }
+        if (payload.action === 'predictive_control_snapshot') {
+          if (payload.ok && payload.predictive_control_snapshot) {
+            setPredictiveControlSnapshot(payload.predictive_control_snapshot);
+            setPredictiveControlStatus({
+              available: true,
+              error: '',
+              fetchedAt: new Date().toISOString()
+            });
+          } else {
+            setPredictiveControlStatus((prev) => ({
+              available: false,
+              error: payload.error || 'predictive control snapshot unavailable',
+              fetchedAt: prev.fetchedAt
+            }));
+          }
+          return;
+        }
         if (Array.isArray(payload.faults)) {
           setFaults(payload.faults);
         }
@@ -766,9 +798,11 @@ export function App() {
       return undefined;
     }
     sendControl('route_snapshot');
+    sendControl('predictive_control_snapshot');
     const timer = window.setInterval(() => {
       sendControl('route_snapshot');
-    }, ROUTE_SNAPSHOT_POLL_MS);
+      sendControl('predictive_control_snapshot');
+    }, Math.min(ROUTE_SNAPSHOT_POLL_MS, PREDICTIVE_CONTROL_POLL_MS));
     return () => window.clearInterval(timer);
   }, [connected]);
 
@@ -857,6 +891,29 @@ export function App() {
     () => buildRouteAnalysis(routeSnapshot, routeQuery.srcId, routeQuery.dstId),
     [routeSnapshot, routeQuery]
   );
+  const predictiveControllerState =
+    predictiveControlSnapshot && typeof predictiveControlSnapshot === 'object'
+      ? predictiveControlSnapshot.controller_state || null
+      : null;
+  const predictiveRouteState =
+    predictiveControlSnapshot && typeof predictiveControlSnapshot === 'object'
+      ? predictiveControlSnapshot.route_state || null
+      : null;
+  const predictiveSimState =
+    predictiveControlSnapshot && typeof predictiveControlSnapshot === 'object'
+      ? predictiveControlSnapshot.sim_state || null
+      : null;
+  const predictiveRouteSlot = predictiveRouteState?.slot_index ?? predictiveControllerState?.route_slot_index ?? null;
+  const predictiveSimSlot = predictiveSimState?.slot_index ?? predictiveControllerState?.sim_slot_index ?? null;
+  const predictiveOffsetS = predictiveControllerState?.offset_s ?? null;
+  const predictiveRouteOk =
+    typeof predictiveControllerState?.route_ok === 'boolean'
+      ? predictiveControllerState.route_ok
+      : (typeof predictiveRouteState?.apply_fail === 'number' ? predictiveRouteState.apply_fail === 0 : null);
+  const predictiveSimOk =
+    typeof predictiveControllerState?.sim_ok === 'boolean'
+      ? predictiveControllerState.sim_ok
+      : (typeof predictiveSimState?.apply_ok === 'boolean' ? predictiveSimState.apply_ok : null);
   const routePathNodeIds = useMemo(
     () => new Set(routeAnalysis.pathIds),
     [routeAnalysis.pathIds]
@@ -1498,6 +1555,43 @@ export function App() {
                 ))}
               </div>
             </>
+          ) : null}
+        </div>
+        <div className="predictive-panel">
+          <div className="layer-header">
+            <span>预测控制面</span>
+            <button type="button" onClick={() => sendControl('predictive_control_snapshot')}>刷新</button>
+          </div>
+          <div className="route-hint">
+            面板读取的是预测控制器当前状态文件，展示 route slot 与 sim policy slot 的实际切换进度。
+          </div>
+          <div className="route-meta">
+            <span className={`badge ${predictiveControlStatus.available ? 'ok' : 'warn'}`}>
+              控制器 {predictiveControlStatus.available ? '已加载' : '未加载'}
+            </span>
+            <span className={`badge ${
+              predictiveRouteOk == null ? 'warn' : (predictiveRouteOk ? 'ok' : 'error')
+            }`}>
+              路由 {predictiveRouteOk == null ? '未知' : (predictiveRouteOk ? '成功' : '失败')}
+            </span>
+            <span className={`badge ${
+              predictiveSimOk == null ? 'warn' : (predictiveSimOk ? 'ok' : 'error')
+            }`}>
+              仿真器 {predictiveSimOk == null ? '未知' : (predictiveSimOk ? '成功' : '失败')}
+            </span>
+          </div>
+          <div className="predictive-summary">
+            <div>控制器时间: {formatTimestamp(predictiveControllerState?.updated_at || predictiveControlStatus.fetchedAt)}</div>
+            <div>相对偏移: {typeof predictiveOffsetS === 'number' ? `${predictiveOffsetS.toFixed(1)} s` : '-'}</div>
+            <div>路由 slot: {predictiveRouteSlot ?? '-'}</div>
+            <div>仿真器 slot: {predictiveSimSlot ?? '-'}</div>
+            <div>路由 upserts: {predictiveRouteState?.route_upserts ?? '-'}</div>
+            <div>路由 deletes: {predictiveRouteState?.route_deletes ?? '-'}</div>
+            <div>仿真器规则数: {predictiveSimState?.rule_count ?? '-'}</div>
+            <div>仿真器容器: {predictiveSimState?.sim_container || predictiveControllerState?.sim_container || '-'}</div>
+          </div>
+          {!predictiveControlStatus.available && predictiveControlStatus.error ? (
+            <div className="route-empty">{predictiveControlStatus.error}</div>
           ) : null}
         </div>
         <div className="legend">

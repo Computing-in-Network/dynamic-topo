@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
         default="run/star300lite/route_snapshot.json",
         help="Optional JSON path exposing the latest applied static-route snapshot",
     )
+    parser.add_argument(
+        "--predictive-control-dir",
+        default="run/predictive_control_plane",
+        help="Optional directory exposing predictive control-plane state files",
+    )
     return parser.parse_args()
 
 
@@ -63,7 +68,45 @@ def _load_route_snapshot(route_snapshot_path: Path | None) -> dict:
     return payload
 
 
-def _handle_control_message(engine: TopologyEngine, payload: dict, route_snapshot_path: Path | None) -> dict:
+def _load_predictive_control_snapshot(predictive_control_dir: Path | None) -> dict:
+    if predictive_control_dir is None:
+        raise ValueError("predictive control snapshot is disabled")
+    if not predictive_control_dir.is_dir():
+        raise ValueError(f"predictive control directory not found: {predictive_control_dir}")
+
+    payload: dict[str, object] = {
+        "schema": "dynamic_topo.predictive_control_snapshot.v1",
+        "directory": str(predictive_control_dir),
+    }
+    files = {
+        "controller_state": predictive_control_dir / "controller_state.json",
+        "route_state": predictive_control_dir / "route_state.json",
+        "sim_state": predictive_control_dir / "sim_state.json",
+    }
+    available = False
+    for key, path in files.items():
+        if not path.is_file():
+            payload[key] = None
+            continue
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"predictive control state is invalid JSON: {path}") from exc
+        if not isinstance(value, dict):
+            raise ValueError(f"predictive control state root must be a JSON object: {path}")
+        payload[key] = value
+        available = True
+    if not available:
+        raise ValueError(f"predictive control state files not found under: {predictive_control_dir}")
+    return payload
+
+
+def _handle_control_message(
+    engine: TopologyEngine,
+    payload: dict,
+    route_snapshot_path: Path | None,
+    predictive_control_dir: Path | None,
+) -> dict:
     action = payload.get("action")
     request_id = payload.get("request_id")
     if not isinstance(action, str) or not action:
@@ -172,6 +215,15 @@ def _handle_control_message(engine: TopologyEngine, payload: dict, route_snapsho
                 "request_id": request_id,
                 "route_snapshot": _load_route_snapshot(route_snapshot_path),
             }
+
+        if action == "predictive_control_snapshot":
+            return {
+                "type": "control_ack",
+                "ok": True,
+                "action": action,
+                "request_id": request_id,
+                "predictive_control_snapshot": _load_predictive_control_snapshot(predictive_control_dir),
+            }
     except ValueError as exc:
         return _control_error(action, request_id, str(exc))
 
@@ -188,6 +240,10 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
     route_snapshot_path = None
     if config.route_snapshot_path:
         route_snapshot_path = Path(config.route_snapshot_path).expanduser()
+    predictive_control_dir = None
+    predictive_dir = getattr(config, "predictive_control_dir", None)
+    if predictive_dir:
+        predictive_control_dir = Path(predictive_dir).expanduser()
     clients: set = set()
     redis_queue: asyncio.Queue[tuple[float, object, object]] = asyncio.Queue(maxsize=2)
 
@@ -203,7 +259,12 @@ async def run_server(host: str, port: int, config: SimulationConfig, seed: int) 
                     if not isinstance(payload, dict):
                         response = _control_error(None, None, "payload must be a JSON object")
                     else:
-                        response = _handle_control_message(engine, payload, route_snapshot_path)
+                        response = _handle_control_message(
+                            engine,
+                            payload,
+                            route_snapshot_path,
+                            predictive_control_dir,
+                        )
                 await websocket.send(json.dumps(response, separators=(",", ":")))
         finally:
             clients.discard(websocket)
@@ -284,6 +345,7 @@ def main() -> None:
         link_policy_path=args.link_policy,
         link_policy_hot_reload=args.hot_reload_link_policy,
         route_snapshot_path=args.route_snapshot,
+        predictive_control_dir=args.predictive_control_dir,
     )
     asyncio.run(run_server(args.host, args.port, config=config, seed=args.seed))
 
