@@ -24,6 +24,8 @@ STREAM_DT="${STREAM_DT:-1.0}"
 RUN_DIR="${RUN_DIR:-$ROOT_DIR/run/star10_dv_route_a}"
 SUBSET_MAPPING_CSV="${SUBSET_MAPPING_CSV:-$RUN_DIR/node_mapping_10.csv}"
 NEIGHBOR_SNAPSHOT_PATH="${NEIGHBOR_SNAPSHOT_PATH:-$RUN_DIR/dv_neighbor_snapshot.json}"
+TOPOLOGY_SNAPSHOT_PATH="${TOPOLOGY_SNAPSHOT_PATH:-$RUN_DIR/topology_component_snapshot.json}"
+TOPOLOGY_SAMPLE_FRAMES="${TOPOLOGY_SAMPLE_FRAMES:-20}"
 mkdir -p "$RUN_DIR"
 
 start_bg() {
@@ -86,11 +88,29 @@ fi
   --container-prefix "$CONTAINER_PREFIX" \
   --output "$MAPPING_CSV"
 
+if [[ "$SUBSET_STRATEGY" == "largest-component-snapshot" ]]; then
+  full_node_count="$("$PYTHON_BIN" - <<'PY' "$MAPPING_CSV"
+import csv
+import sys
+with open(sys.argv[1], "r", encoding="utf-8", newline="") as fp:
+    rows = list(csv.DictReader(fp))
+print(len(rows))
+PY
+)"
+  "$PYTHON_BIN" scripts/capture_best_component_snapshot.py \
+    --ws-url "$WS_URL" \
+    --mapping-csv "$MAPPING_CSV" \
+    --max-nodes "$full_node_count" \
+    --output "$TOPOLOGY_SNAPSHOT_PATH" \
+    --sample-frames "$TOPOLOGY_SAMPLE_FRAMES"
+fi
+
 "$PYTHON_BIN" scripts/select_mapping_subset.py \
   --input "$MAPPING_CSV" \
   --output "$SUBSET_MAPPING_CSV" \
   --max-nodes "$NODE_COUNT" \
-  --strategy "$SUBSET_STRATEGY"
+  --strategy "$SUBSET_STRATEGY" \
+  --snapshot "$TOPOLOGY_SNAPSHOT_PATH"
 
 "$PYTHON_BIN" scripts/restore_sim_datapath.py \
   --sim-container "$SIM_CONTAINER" \
