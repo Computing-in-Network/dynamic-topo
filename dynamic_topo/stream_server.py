@@ -82,6 +82,7 @@ def _load_predictive_control_snapshot(predictive_control_dir: Path | None) -> di
         "controller_state": predictive_control_dir / "controller_state.json",
         "route_state": predictive_control_dir / "route_state.json",
         "sim_state": predictive_control_dir / "sim_state.json",
+        "neighbor_state": predictive_control_dir / "neighbor_state.json",
     }
     available = False
     for key, path in files.items():

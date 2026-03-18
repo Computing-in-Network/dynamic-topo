@@ -903,8 +903,14 @@ export function App() {
     predictiveControlSnapshot && typeof predictiveControlSnapshot === 'object'
       ? predictiveControlSnapshot.sim_state || null
       : null;
+  const predictiveNeighborState =
+    predictiveControlSnapshot && typeof predictiveControlSnapshot === 'object'
+      ? predictiveControlSnapshot.neighbor_state || null
+      : null;
   const predictiveRouteSlot = predictiveRouteState?.slot_index ?? predictiveControllerState?.route_slot_index ?? null;
   const predictiveSimSlot = predictiveSimState?.slot_index ?? predictiveControllerState?.sim_slot_index ?? null;
+  const predictiveNeighborSlot =
+    predictiveNeighborState?.slot_index ?? predictiveControllerState?.neighbor_slot_index ?? null;
   const predictiveOffsetS = predictiveControllerState?.offset_s ?? null;
   const predictiveRouteOk =
     typeof predictiveControllerState?.route_ok === 'boolean'
@@ -914,6 +920,10 @@ export function App() {
     typeof predictiveControllerState?.sim_ok === 'boolean'
       ? predictiveControllerState.sim_ok
       : (typeof predictiveSimState?.apply_ok === 'boolean' ? predictiveSimState.apply_ok : null);
+  const predictiveNeighborOk =
+    typeof predictiveControllerState?.neighbor_ok === 'boolean'
+      ? predictiveControllerState.neighbor_ok
+      : (typeof predictiveNeighborState?.apply_fail === 'number' ? predictiveNeighborState.apply_fail === 0 : null);
   const routePathNodeIds = useMemo(
     () => new Set(routeAnalysis.pathIds),
     [routeAnalysis.pathIds]
@@ -1563,7 +1573,7 @@ export function App() {
             <button type="button" onClick={() => sendControl('predictive_control_snapshot')}>刷新</button>
           </div>
           <div className="route-hint">
-            面板读取的是预测控制器当前状态文件，展示 route slot 与 sim policy slot 的实际切换进度。
+            面板读取的是预测控制器当前状态文件，展示 route、neighbor 与 sim policy 的实际切换进度。
           </div>
           <div className="route-meta">
             <span className={`badge ${predictiveControlStatus.available ? 'ok' : 'warn'}`}>
@@ -1579,14 +1589,22 @@ export function App() {
             }`}>
               仿真器 {predictiveSimOk == null ? '未知' : (predictiveSimOk ? '成功' : '失败')}
             </span>
+            <span className={`badge ${
+              predictiveNeighborOk == null ? 'warn' : (predictiveNeighborOk ? 'ok' : 'error')
+            }`}>
+              邻居 {predictiveNeighborOk == null ? '未知' : (predictiveNeighborOk ? '成功' : '失败')}
+            </span>
           </div>
           <div className="predictive-summary">
             <div>控制器时间: {formatTimestamp(predictiveControllerState?.updated_at || predictiveControlStatus.fetchedAt)}</div>
             <div>相对偏移: {typeof predictiveOffsetS === 'number' ? `${predictiveOffsetS.toFixed(1)} s` : '-'}</div>
             <div>路由 slot: {predictiveRouteSlot ?? '-'}</div>
             <div>仿真器 slot: {predictiveSimSlot ?? '-'}</div>
+            <div>邻居 slot: {predictiveNeighborSlot ?? '-'}</div>
             <div>路由 upserts: {predictiveRouteState?.route_upserts ?? '-'}</div>
             <div>路由 deletes: {predictiveRouteState?.route_deletes ?? '-'}</div>
+            <div>邻居 upserts: {predictiveNeighborState?.neighbor_upserts ?? '-'}</div>
+            <div>邻居 deletes: {predictiveNeighborState?.neighbor_deletes ?? '-'}</div>
             <div>仿真器规则数: {predictiveSimState?.rule_count ?? '-'}</div>
             <div>仿真器容器: {predictiveSimState?.sim_container || predictiveControllerState?.sim_container || '-'}</div>
           </div>
