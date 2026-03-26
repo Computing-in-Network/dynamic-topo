@@ -1,0 +1,20 @@
+services:
+  topo-backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend.local
+    container_name: dynamic-topo-backend
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+
+  topo-frontend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.frontend.local
+    container_name: dynamic-topo-frontend
+    restart: unless-stopped
+    depends_on:
+      - topo-backend
+    ports:
+      - "5173:80"
